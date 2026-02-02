@@ -9,6 +9,17 @@ authors = [
 requires-python = ">=3.12"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.3.0",
+    "ruff>=0.12.9",
+    "pytest>=7.1.3,<8",
+    "flake8",
+]
+
+[tool.uv]
+default-groups = []
+
 [project.scripts]
 meerkhive = "meerkhive:main"
 
