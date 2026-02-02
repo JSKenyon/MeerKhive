@@ -415,7 +415,6 @@ async def data(
                 }}
             """
 
-
             # Define GraphQL query
             query = gql(query_str)
             filters = parse_filters(filters)

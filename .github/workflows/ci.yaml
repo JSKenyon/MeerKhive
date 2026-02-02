@@ -1,4 +1,4 @@
-name: MCP CI Workflow
+name: MeerKhive CI Workflow
 
 # Specific github action events that you can lookup in their API
 on:
