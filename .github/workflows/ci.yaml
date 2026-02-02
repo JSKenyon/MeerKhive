@@ -28,7 +28,7 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v7
       with:
         version: "0.8.5"
     - name: Install MeerKhive
@@ -49,7 +49,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.5"
       - name: Install MeerKhive
