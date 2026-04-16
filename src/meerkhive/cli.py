@@ -62,7 +62,10 @@ def main(
         list[str] | None,
         typer.Option(
             "--filter",
-            help="key=value filter, repeatable (e.g. --filter Band=L --filter from=2024-01-01).",
+            help=(
+                "key=value filter, repeatable "
+                '(e.g. --filter Band=L --filter dateRange=["2024-01-01T00:00:00.000Z",null]).'
+            ),
         ),
     ] = None,
     verify_ssl: Annotated[

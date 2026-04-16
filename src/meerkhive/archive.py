@@ -31,7 +31,6 @@ import os
 import re
 import ssl
 from collections.abc import Callable
-from datetime import datetime, timezone
 from typing import Any, Literal
 
 from aiohttp import ClientConnectorCertificateError, ClientConnectorSSLError
@@ -72,7 +71,6 @@ __all__ = [
     "query_archive",
     "query_archive_async",
     "unwrap_type",
-    "DATE_RANGE_FILTER_FIELDS",
     "DEFAULT_FIELD_OVERRIDES",
     "JSON_FILTER_FIELDS",
     "LIST_FILTER_FIELDS",
@@ -111,19 +109,14 @@ def build_ssl_context(verify: bool) -> ssl.SSLContext:
 # ---------------------------------------------------------------------------
 
 # Filter keys whose string value should be parsed as a JSON object (e.g. a
-# coordinate dict). Extend this set when the schema adds further JSON-valued
-# filter fields.
-JSON_FILTER_FIELDS: frozenset[str] = frozenset({"radec"})
+# coordinate dict or a date-range array). Extend this set when the schema adds
+# further JSON-valued filter fields.
+JSON_FILTER_FIELDS: frozenset[str] = frozenset({"dateRange", "radec"})
 
 # Filter keys whose value is a comma-separated list of alternatives (Solr
 # multi-value match). Adding a new list-typed field here is sufficient;
 # parse_filters requires no other change.
 LIST_FILTER_FIELDS: frozenset[str] = frozenset({"Band", "NumFreqChannels", "QA2"})
-
-# Filter keys that are normalised to midnight UTC and accumulated into a
-# single ``dateRange`` filter. The key names must match the keys of the
-# ``date_range`` accumulator dict inside parse_filters.
-DATE_RANGE_FILTER_FIELDS: frozenset[str] = frozenset({"from", "to"})
 
 
 def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
@@ -131,9 +124,9 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
 
     Handles several special cases beyond a simple key-value mapping:
 
-    - ``from`` / ``to``: normalised to midnight UTC and combined into a single
-      ``dateRange`` filter.
-    - ``radec``: value is parsed as JSON (e.g. ``'{"ra": 1.23, "dec": -4.56}'``).
+    - ``dateRange``, ``radec``: value is parsed as JSON (e.g.
+      ``'["2024-01-01T00:00:00.000Z", null]'`` for an open-ended date range,
+      or ``'{"ra": 1.23, "dec": -4.56}'`` for a coordinate filter).
     - ``Band``, ``QA2``, ``NumFreqChannels``: comma-separated values are split
       into a list for multi-value matching.
     - All other keys: passed through as-is.
@@ -150,7 +143,6 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
         ValueError: If an entry cannot be split into a key-value pair.
     """
     filters: list[dict[str, Any]] = []
-    date_range: dict[str, str | None] = {"from": None, "to": None}
 
     for f in raw_filters:
         parts = re.split(r"[=:]", f, maxsplit=1)
@@ -159,13 +151,7 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
 
         key, val = parts[0].strip(), parts[1].strip()
 
-        if key in DATE_RANGE_FILTER_FIELDS:
-            # Normalize to midnight UTC; both bounds are accumulated and emitted
-            # as a single dateRange filter after the loop.
-            dt = datetime.fromisoformat(val).replace(tzinfo=timezone.utc)
-            midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            date_range[key] = midnight.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        elif key in JSON_FILTER_FIELDS:
+        if key in JSON_FILTER_FIELDS:
             filters.append({"field": key, "value": json.loads(val)})
         elif key in LIST_FILTER_FIELDS:
             values = [v.strip() for v in val.split(",") if v.strip()]
@@ -173,9 +159,6 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
                 filters.append({"field": key, "value": values})
         else:
             filters.append({"field": key, "value": val})
-
-    if date_range["from"] or date_range["to"]:
-        filters.append({"field": "dateRange", "value": [date_range["from"], date_range["to"]]})
 
     return filters
 
