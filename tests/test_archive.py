@@ -249,17 +249,17 @@ def test_parse_filters_simple_key_value():
     assert result == [{"field": "Band", "value": ["L"]}]
 
 
-def test_parse_filters_colon_separator():
-    result = parse_filters(["search:NGC1234"])
-    assert result == [{"field": "search", "value": "NGC1234"}]
+def test_parse_filters_colon_separator_rejected():
+    with pytest.raises(ValueError, match="Invalid filter format"):
+        parse_filters(["search:NGC1234"])
 
 
-def test_parse_filters_date_range_combined():
+def test_parse_filters_from_to_pass_through():
     result = parse_filters(["from=2024-01-01", "to=2024-03-31"])
-    assert len(result) == 1
-    assert result[0]["field"] == "dateRange"
-    assert result[0]["value"][0].startswith("2024-01-01")
-    assert result[0]["value"][1].startswith("2024-03-31")
+    assert result == [
+        {"field": "from", "value": "2024-01-01"},
+        {"field": "to", "value": "2024-03-31"},
+    ]
 
 
 def test_parse_filters_radec_parsed_as_json():
@@ -287,9 +287,9 @@ def test_parse_sort_colon_separator():
     assert result == [{"columnKey": "StartTime", "direction": "DESC"}]
 
 
-def test_parse_sort_equals_separator():
-    result = parse_sort(["StartTime=asc"])
-    assert result == [{"columnKey": "StartTime", "direction": "ASC"}]
+def test_parse_sort_equals_separator_rejected():
+    with pytest.raises(ValueError, match="Invalid sort format"):
+        parse_sort(["StartTime=asc"])
 
 
 def test_parse_sort_multiple():

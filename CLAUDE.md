@@ -26,4 +26,4 @@ Three modules under `src/meerkhive/`:
 
 **GraphQL query building**: `build_selection_block()` walks the live `Observation` type to depth 3. Skips fields with required args unless an override exists. `DEFAULT_FIELD_OVERRIDES` handles `rdb(internal: bool)`.
 
-**Filters**: `parse_filters()` maps `key=value` args to `[{field, value}]`. Special cases: `from`/`to` → `dateRange`; `radec` → JSON-parsed dict; `Band`, `QA2`, `NumFreqChannels` → comma-split lists.
+**Filters**: `parse_filters()` maps `key=value` args to `[{field, value}]`. Special cases: `radec` → JSON-parsed dict; `Band`, `QA2`, `NumFreqChannels` → comma-split lists. All other keys pass through as plain strings.

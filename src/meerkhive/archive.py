@@ -28,7 +28,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import ssl
 from collections.abc import Callable
 from typing import Any, Literal
@@ -132,8 +131,7 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
     - All other keys: passed through as-is.
 
     Args:
-        raw_filters: Each entry should be of the form ``"key=value"`` or
-            ``"key:value"``.
+        raw_filters: Each entry should be of the form ``"key=value"``.
 
     Returns:
         A list of ``{"field": key, "value": val}`` dicts ready to be passed
@@ -145,7 +143,7 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
     filters: list[dict[str, Any]] = []
 
     for f in raw_filters:
-        parts = re.split(r"[=:]", f, maxsplit=1)
+        parts = f.split("=", maxsplit=1)
         if len(parts) != 2:
             raise ValueError(f"Invalid filter format (expected key=value): {f!r}")
 
@@ -167,28 +165,26 @@ def parse_sort(sort_args: list[str]) -> list[dict[str, str]]:
     """Parse a list of sort specifiers into GraphQL ``SortColumnInput`` dicts.
 
     Args:
-        sort_args: Each entry should be ``"field:asc"``, ``"field:desc"``,
-            ``"field=asc"``, or ``"field=desc"`` (case-insensitive direction).
+        sort_args: Each entry should be ``"field:asc"`` or ``"field:desc"``
+            (case-insensitive direction).
 
     Returns:
         A list of ``{"columnKey": field, "direction": "ASC"|"DESC"}`` dicts
         suitable for the GraphQL ``sort`` variable.
 
     Raises:
-        ValueError: If an entry does not contain a ``:`` or ``=`` separator,
-            or if the direction is not ``asc`` or ``desc``.
+        ValueError: If an entry does not contain a ``:`` separator, or if the
+            direction is not ``asc`` or ``desc``.
     """
     result: list[dict[str, str]] = []
 
     for entry in sort_args:
-        if ":" in entry:
-            field, direction = entry.split(":", 1)
-        elif "=" in entry:
-            field, direction = entry.split("=", 1)
-        else:
+        parts = entry.split(":", 1)
+        if len(parts) != 2:
             raise ValueError(
-                f"Invalid sort format: {entry!r}. Expected 'field:asc' or 'field=desc'."
+                f"Invalid sort format: {entry!r}. Expected 'field:asc' or 'field:desc'."
             )
+        field, direction = parts
 
         direction = direction.strip().upper()
         if direction not in ("ASC", "DESC"):
