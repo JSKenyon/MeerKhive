@@ -72,7 +72,10 @@ __all__ = [
     "query_archive",
     "query_archive_async",
     "unwrap_type",
+    "DATE_RANGE_FILTER_FIELDS",
     "DEFAULT_FIELD_OVERRIDES",
+    "JSON_FILTER_FIELDS",
+    "LIST_FILTER_FIELDS",
 ]
 
 
@@ -106,6 +109,21 @@ def build_ssl_context(verify: bool) -> ssl.SSLContext:
 # ---------------------------------------------------------------------------
 # Filter and sort parsing
 # ---------------------------------------------------------------------------
+
+# Filter keys whose string value should be parsed as a JSON object (e.g. a
+# coordinate dict). Extend this set when the schema adds further JSON-valued
+# filter fields.
+JSON_FILTER_FIELDS: frozenset[str] = frozenset({"radec"})
+
+# Filter keys whose value is a comma-separated list of alternatives (Solr
+# multi-value match). Adding a new list-typed field here is sufficient;
+# parse_filters requires no other change.
+LIST_FILTER_FIELDS: frozenset[str] = frozenset({"Band", "NumFreqChannels", "QA2"})
+
+# Filter keys that are normalised to midnight UTC and accumulated into a
+# single ``dateRange`` filter. The key names must match the keys of the
+# ``date_range`` accumulator dict inside parse_filters.
+DATE_RANGE_FILTER_FIELDS: frozenset[str] = frozenset({"from", "to"})
 
 
 def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
@@ -141,18 +159,15 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
 
         key, val = parts[0].strip(), parts[1].strip()
 
-        if key == "from":
-            # Normalize to midnight UTC.
+        if key in DATE_RANGE_FILTER_FIELDS:
+            # Normalize to midnight UTC; both bounds are accumulated and emitted
+            # as a single dateRange filter after the loop.
             dt = datetime.fromisoformat(val).replace(tzinfo=timezone.utc)
             midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            date_range["from"] = midnight.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        elif key == "to":
-            dt = datetime.fromisoformat(val).replace(tzinfo=timezone.utc)
-            midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            date_range["to"] = midnight.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        elif key == "radec":
+            date_range[key] = midnight.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        elif key in JSON_FILTER_FIELDS:
             filters.append({"field": key, "value": json.loads(val)})
-        elif key in ("NumFreqChannels", "Band", "QA2"):
+        elif key in LIST_FILTER_FIELDS:
             values = [v.strip() for v in val.split(",") if v.strip()]
             if values:
                 filters.append({"field": key, "value": values})
