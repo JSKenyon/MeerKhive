@@ -38,15 +38,13 @@ from gql.client import Client
 from gql.transport.aiohttp import AIOHTTPTransport
 from gql.transport.exceptions import TransportQueryError, TransportServerError
 from graphql import (
-    GraphQLEnumType,
-    GraphQLInterfaceType,
-    GraphQLList,
-    GraphQLNonNull,
     GraphQLObjectType,
-    GraphQLScalarType,
-    GraphQLUnionType,
+    get_named_type,
+    is_abstract_type,
+    is_leaf_type,
+    is_object_type,
+    is_required_argument,
 )
-from graphql.pyutils import Undefined
 from requests.exceptions import SSLError
 
 from meerkhive.auth import KeycloakAuth, get_access_token
@@ -69,7 +67,6 @@ __all__ = [
     "parse_sort",
     "query_archive",
     "query_archive_async",
-    "unwrap_type",
     "DEFAULT_FIELD_OVERRIDES",
     "JSON_FILTER_FIELDS",
     "LIST_FILTER_FIELDS",
@@ -202,22 +199,6 @@ def parse_sort(sort_args: list[str]) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-def unwrap_type(gql_type: Any) -> Any:
-    """Strip ``GraphQLNonNull`` and ``GraphQLList`` wrappers from a type.
-
-    Args:
-        gql_type: A GraphQL type, possibly wrapped in one or more
-            ``GraphQLNonNull`` or ``GraphQLList`` layers.
-
-    Returns:
-        The innermost GraphQL type with all non-null and list wrappers
-        removed.
-    """
-    while isinstance(gql_type, (GraphQLNonNull, GraphQLList)):
-        gql_type = gql_type.of_type
-    return gql_type
-
-
 # Field-name -> ``(url_format) -> selection-fragment`` mapping. The default
 # carries the only schema-specific knowledge: the ``rdb`` field needs an
 # ``internal`` boolean argument that toggles whether the URL is reachable
@@ -229,7 +210,7 @@ DEFAULT_FIELD_OVERRIDES: dict[str, Callable[[UrlFormat], str]] = {
 
 
 def build_selection_block(
-    gql_type: Any,
+    gql_type: GraphQLObjectType,
     *,
     depth: int = 0,
     max_depth: int = 3,
@@ -242,11 +223,14 @@ def build_selection_block(
 
     Args:
         gql_type: A ``GraphQLObjectType`` to walk.
-        depth: Current recursion depth (caller passes 0).
+        depth: Current recursion depth; callers should always use the default
+            of 0. The parameter exists only to track state across recursive
+            calls.
         max_depth: Stop recursing into nested object types beyond this depth.
         skip_fields: Field names to omit entirely.
-        fields: At the top level, the set of fields to include. ``None`` or
-            ``{"*"}`` means all. Nested levels always include all fields.
+        fields: Specific top-level fields to include. ``None`` (the default)
+            includes every field the schema exposes. Nested levels always
+            include all fields regardless of this setting.
         url_format: Forwarded to field overrides.
         field_overrides: Per-field rendering overrides; falls back to
             :data:`DEFAULT_FIELD_OVERRIDES` when ``None``.
@@ -254,17 +238,20 @@ def build_selection_block(
     Returns:
         The selection block as a single multi-line string (no surrounding
         braces — the caller wraps it in the outer query).
+
+    Raises:
+        ValueError: If ``fields`` is not ``None`` and none of the named
+            fields exist in the schema.
     """
     indent = "  " * (depth + 1)
     skip_fields = skip_fields or set()
     overrides = field_overrides if field_overrides is not None else DEFAULT_FIELD_OVERRIDES
-    include_all = not fields or "*" in fields
 
     lines: list[str] = []
     for field_name, field in gql_type.fields.items():
         if field_name in skip_fields:
             continue
-        if not include_all and field_name not in fields:
+        if fields is not None and field_name not in fields:
             continue
 
         # Skip fields that require arguments (e.g. ``products(type: ProductType!)``)
@@ -272,17 +259,16 @@ def build_selection_block(
         # guard the generated query fails GraphQL validation whenever the
         # archive schema adds a new field with a required argument.
         if field_name not in overrides and any(
-            isinstance(arg.type, GraphQLNonNull) and arg.default_value is Undefined
-            for arg in field.args.values()
+            is_required_argument(arg) for arg in field.args.values()
         ):
             continue
 
-        unwrapped = unwrap_type(field.type)
-        if isinstance(unwrapped, GraphQLObjectType) and depth >= max_depth:
+        unwrapped = get_named_type(field.type)
+        if is_object_type(unwrapped) and depth >= max_depth:
             # Cannot select sub-fields beyond the depth limit; skip rather
             # than emitting a bare field name which would be invalid GraphQL.
             continue
-        if isinstance(unwrapped, (GraphQLInterfaceType, GraphQLUnionType)):
+        if is_abstract_type(unwrapped):
             # Abstract types require inline fragments, which this walker does
             # not yet generate. Skip rather than emit invalid GraphQL; log at
             # debug so schema additions using these types remain visible.
@@ -291,26 +277,27 @@ def build_selection_block(
                 "(interface/union) are not supported."
             )
             continue
+
         override = overrides.get(field_name)
         rendered_name = override(url_format) if override else field_name
 
         # Scalars and enums are both GraphQL leaf types — emit them as bare
         # field names without a sub-selection.
-        if isinstance(unwrapped, (GraphQLScalarType, GraphQLEnumType)):
+        if is_leaf_type(unwrapped):
             lines.append(f"{indent}{rendered_name}")
-        elif isinstance(unwrapped, GraphQLObjectType):
+        elif is_object_type(unwrapped):
             nested = build_selection_block(
                 unwrapped,
                 depth=depth + 1,
                 max_depth=max_depth,
                 skip_fields=skip_fields,
-                fields={"*"},  # always include all nested subfields
+                fields=None,  # always include all nested subfields
                 url_format=url_format,
                 field_overrides=overrides,
             )
             lines.append(f"{indent}{rendered_name} {{\n{nested}\n{indent}}}")
 
-    if not lines and depth == 0 and fields and "*" not in fields:
+    if not lines and depth == 0 and fields is not None:
         raise ValueError(
             f"None of the requested fields {fields!r} matched the schema. "
             "Field names are case-sensitive. Run `meerkhive --show-fields` to see available names."
@@ -516,7 +503,13 @@ async def query_archive_async(
     filters = list(filters or [])
     parsed_sort = parse_sort(sort or [])
     skip_fields = {s.strip() for s in (exclude_fields or "").split(",") if s.strip()}
-    requested_fields = {s.strip() for s in (fields or "*").split(",") if s.strip()}
+    # None and the literal "*" both mean "include all fields". Normalise to
+    # None here so build_selection_block receives an unambiguous sentinel.
+    requested_fields = (
+        None
+        if not fields or fields.strip() == "*"
+        else {s.strip() for s in fields.split(",") if s.strip()}
+    )
 
     auth = KeycloakAuth.default(verify_ssl=verify_ssl)
     ssl_context = build_ssl_context(verify=verify_ssl)

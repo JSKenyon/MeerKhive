@@ -22,7 +22,7 @@ from graphql import (
 )
 from graphql.pyutils import Undefined
 
-from meerkhive.archive import build_selection_block, parse_filters, parse_sort, unwrap_type
+from meerkhive.archive import build_selection_block, parse_filters, parse_sort
 
 
 @pytest.fixture
@@ -48,17 +48,6 @@ def observation_type() -> GraphQLObjectType:
             "telescope": GraphQLField(nested),
         },
     )
-
-
-# ---------------------------------------------------------------------------
-# unwrap_type
-# ---------------------------------------------------------------------------
-
-
-def test_unwrap_type_strips_nonnull_and_list():
-    inner = GraphQLString
-    wrapped = GraphQLNonNull(GraphQLList(GraphQLNonNull(inner)))
-    assert unwrap_type(wrapped) is inner
 
 
 # ---------------------------------------------------------------------------
@@ -98,10 +87,11 @@ def test_build_selection_block_explicit_field_subset(observation_type):
     assert "telescope" not in block
 
 
-def test_build_selection_block_star_means_all(observation_type):
-    block_star = build_selection_block(observation_type, fields={"*"})
-    block_default = build_selection_block(observation_type, fields=None)
-    assert block_star == block_default
+def test_build_selection_block_none_means_all(observation_type):
+    """Passing fields=None is identical to omitting the argument."""
+    block_explicit_none = build_selection_block(observation_type, fields=None)
+    block_default = build_selection_block(observation_type)
+    assert block_explicit_none == block_default
 
 
 def test_build_selection_block_field_overrides_can_be_replaced(observation_type):

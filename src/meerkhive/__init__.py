@@ -26,7 +26,6 @@ from meerkhive.archive import (
     parse_sort,
     query_archive,
     query_archive_async,
-    unwrap_type,
 )
 from meerkhive.auth import KeycloakAuth, get_access_token
 
@@ -40,7 +39,6 @@ __all__ = [
     "parse_sort",
     "query_archive",
     "query_archive_async",
-    "unwrap_type",
     # Auth
     "KeycloakAuth",
     "get_access_token",
