@@ -6,12 +6,12 @@ via PKCE OAuth2 against the SARAO Keycloak realm.
 
 Example::
 
-    from meerkhive import query_archive, parse_filters
+    from meerkhive import query_archive
 
     records = query_archive(
         fields="CaptureBlockId,StartTime",
         limit=10,
-        filters=parse_filters(["Band=L", "from=2024-01-01"]),
+        filters=["Band=L", 'dateRange=["2024-01-01T00:00:00.000Z",null]'],
     )
     for r in records:
         print(r["CaptureBlockId"])

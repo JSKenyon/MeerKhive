@@ -12,11 +12,7 @@ from typing import Annotated, Literal
 
 import typer
 
-from meerkhive.archive import (
-    fetch_fields,
-    parse_filters,
-    query_archive,
-)
+from meerkhive.archive import fetch_fields, query_archive
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +86,6 @@ def main(
         datefmt="%H:%M:%S",
     )
 
-    parsed_filters = parse_filters(filter or [])
-
     if show_fields:
         print(fetch_fields(auth_address=auth_address, verify_ssl=verify_ssl))
         return
@@ -103,7 +97,7 @@ def main(
         search=search,
         limit=limit,
         url_format=url_format,
-        filters=parsed_filters,
+        filters=filter or [],
         verify_ssl=verify_ssl,
         sort=sort or [],
     )

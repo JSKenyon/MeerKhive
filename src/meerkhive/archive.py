@@ -500,7 +500,7 @@ async def query_archive_async(
     search: str = "*",
     limit: int = 1000,
     url_format: UrlFormat = "external",
-    filters: list[dict[str, Any]] | None = None,
+    filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -522,8 +522,10 @@ async def query_archive_async(
         url_format: Either ``"internal"`` or ``"external"``. Controls
             whether URL-valued fields (e.g. ``rdb``) are rendered for
             in-SARAO or public-internet use.
-        filters: List of Solr filter dicts as returned by
-            :func:`parse_filters`. Pass ``None`` (or omit) for no filtering.
+        filters: List of ``"key=value"`` filter strings. Parsed internally
+            via :func:`parse_filters`. Pass ``None`` (or omit) for no
+            filtering. Examples: ``["Band=L"]``,
+            ``['dateRange=["2024-01-01T00:00:00.000Z", null]']``.
         verify_ssl: Whether to verify TLS certificates when talking to
             the archive. Set to ``False`` only for development against a
             self-signed endpoint.
@@ -536,7 +538,7 @@ async def query_archive_async(
 
     Raises:
         ValueError: If ``url_format`` is not ``"internal"`` or
-            ``"external"``.
+            ``"external"``, or if any filter or sort string is malformed.
         SSLError: If TLS verification fails against the archive endpoint.
         ClientConnectorSSLError: If the aiohttp connector fails TLS
             verification.
@@ -554,7 +556,7 @@ async def query_archive_async(
             f"Invalid value for 'url_format': {url_format!r}. Must be 'internal' or 'external'."
         )
 
-    filters = list(filters or [])
+    parsed_filters = parse_filters(filters or [])
     parsed_sort = parse_sort(sort or [])
     skip_fields = {s.strip() for s in (exclude_fields or "").split(",") if s.strip()}
     # None and the literal "*" both mean "include all fields". Normalise to
@@ -634,7 +636,7 @@ async def query_archive_async(
                     "limit": min(page_size, limit - fetched),
                     "cursor": cursor,
                     "search": search,
-                    "filters": filters,
+                    "filters": parsed_filters,
                     "sort": parsed_sort,
                 }
                 try:
@@ -680,7 +682,7 @@ def query_archive(
     search: str = "*",
     limit: int = 1000,
     url_format: UrlFormat = "external",
-    filters: list[dict[str, Any]] | None = None,
+    filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
 ) -> list[dict[str, Any]]:
