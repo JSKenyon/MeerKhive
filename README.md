@@ -7,7 +7,7 @@ NDJSON to stdout so the output is pipeable to `jq`, `grep`, and similar tools.
 
 ## Requirements
 
-- Python ≥ 3.12
+- Python ≥ 3.11
 - [uv](https://docs.astral.sh/uv/)
 - A SARAO archive account (required at runtime for authentication)
 
@@ -71,12 +71,15 @@ meerkhive --exclude-fields products,FileSize --limit 20
 
 ### Filtering
 
-Filters use `--filter key=value` syntax and are repeatable. Date ranges, multi-value
-lists, and spatial (RA/Dec) queries are handled automatically:
+Filters use `--filter key=value` syntax and are repeatable. Several keys have special
+handling: `Band`, `QA2`, and `NumFreqChannels` accept comma-separated lists; `dateRange`
+and `radec` values are parsed as JSON. All other keys are passed through as-is:
 
 ```bash
 # L-band observations in January 2024
-meerkhive --filter Band=L --filter from=2024-01-01 --filter to=2024-01-31 --limit 50
+meerkhive --filter Band=L \
+  --filter 'dateRange=["2024-01-01T00:00:00.000Z","2024-01-31T23:59:59.999Z"]' \
+  --limit 50
 
 # Multiple bands at once
 meerkhive --filter Band=L,UHF --limit 20
@@ -132,7 +135,7 @@ meerkhive --url-format internal --limit 5
 ### SSL (development only)
 
 ```bash
-meerkhive --no-check-certificate --auth-address https://dev.archive.example.com --limit 3
+meerkhive --no-verify-ssl --auth-address https://dev.archive.example.com --limit 3
 ```
 
 ## Python API
@@ -153,11 +156,14 @@ for r in records:
 ### Filtering and sorting
 
 ```python
-from meerkhive import query_archive, parse_filters
+from meerkhive import query_archive
 
 records = query_archive(
     fields="CaptureBlockId,StartTime",
-    filters=parse_filters(["Band=L", "from=2024-01-01", "to=2024-03-31"]),
+    filters=[
+        "Band=L",
+        'dateRange=["2024-01-01T00:00:00.000Z","2024-03-31T23:59:59.999Z"]',
+    ],
     sort=["StartTime:desc"],
     limit=50,
 )
@@ -167,12 +173,12 @@ records = query_archive(
 
 ```python
 import asyncio
-from meerkhive import query_archive_async, parse_filters
+from meerkhive import query_archive_async
 
 async def main() -> None:
     records = await query_archive_async(
         fields="CaptureBlockId,Band,IntegrationTime",
-        filters=parse_filters(["Band=L,UHF"]),
+        filters=["Band=L,UHF"],
         sort=["StartTime:desc"],
         limit=100,
     )
@@ -189,9 +195,9 @@ Special-cased keys:
 
 | Key | Behaviour |
 |-----|-----------|
-| `from` / `to` | Normalised to midnight UTC and combined into a `dateRange` filter |
-| `Band`, `QA2`, `NumFreqChannels` | Comma-separated values are split into a list |
+| `dateRange` | Value is parsed as JSON: a two-element ISO 8601 array (use `null` for an open end), e.g. `'["2024-01-01T00:00:00.000Z", null]'` |
 | `radec` | Value is parsed as JSON: `'{"ra": 83.82, "dec": -5.39}'` |
+| `Band`, `QA2`, `NumFreqChannels` | Comma-separated values are split into a list |
 | All others | Passed through as-is |
 
 ```python
@@ -199,12 +205,11 @@ from meerkhive import parse_filters
 
 filters = parse_filters([
     "Band=L,UHF",
-    "from=2024-01-01",
-    "to=2024-06-30",
+    'dateRange=["2024-01-01T00:00:00.000Z","2024-06-30T23:59:59.999Z"]',
 ])
 # [
 #   {"field": "Band", "value": ["L", "UHF"]},
-#   {"field": "dateRange", "value": ["2024-01-01T00:00:00.000Z", "2024-06-30T00:00:00.000Z"]},
+#   {"field": "dateRange", "value": ["2024-01-01T00:00:00.000Z", "2024-06-30T23:59:59.999Z"]},
 # ]
 ```
 
