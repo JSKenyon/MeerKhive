@@ -62,6 +62,7 @@ __all__ = [
     "UrlFormat",
     "build_ssl_context",
     "build_selection_block",
+    "fetch_fields",
     "fetch_fields_async",
     "parse_filters",
     "parse_sort",
@@ -440,7 +441,6 @@ class AuthenticatedTransport(AIOHTTPTransport):
 
 async def fetch_fields_async(
     auth_address: str = "https://archive.sarao.ac.za",
-    url_format: UrlFormat = "external",
     verify_ssl: bool = True,
 ) -> str:
     """Introspect the live schema and return the ``Observation`` selection block.
@@ -452,9 +452,6 @@ async def fetch_fields_async(
     Args:
         auth_address: Base URL of the archive service. The ``/graphql``
             endpoint is appended automatically.
-        url_format: Either ``"internal"`` or ``"external"``. Controls
-            whether URL-valued fields are rendered for in-SARAO or
-            public-internet use.
         verify_ssl: Whether to verify TLS certificates.
 
     Returns:
@@ -477,7 +474,19 @@ async def fetch_fields_async(
                 "The archive schema does not define an 'Observation' object type. "
                 "The schema may have changed or failed to load correctly."
             )
-        return build_selection_block(observation_type, url_format=url_format)
+        return build_selection_block(observation_type)
+
+
+def fetch_fields(
+    auth_address: str = "https://archive.sarao.ac.za",
+    verify_ssl: bool = True,
+) -> str:
+    """Synchronous wrapper around :func:`fetch_fields_async`.
+
+    All arguments are forwarded unchanged. See :func:`fetch_fields_async` for
+    the full parameter and exception documentation.
+    """
+    return asyncio.run(fetch_fields_async(auth_address=auth_address, verify_ssl=verify_ssl))
 
 
 async def query_archive_async(

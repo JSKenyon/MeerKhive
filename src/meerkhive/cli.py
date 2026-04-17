@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 import typer
 
 from meerkhive.archive import (
-    fetch_fields_async,
+    fetch_fields,
     parse_filters,
     query_archive_async,
 )
@@ -94,14 +94,7 @@ def main(
     parsed_filters = parse_filters(filter or [])
 
     if show_fields:
-        selection = asyncio.run(
-            fetch_fields_async(
-                auth_address=auth_address,
-                url_format=url_format,
-                verify_ssl=verify_ssl,
-            )
-        )
-        print(selection)
+        print(fetch_fields(auth_address=auth_address, verify_ssl=verify_ssl))
         return
 
     records = asyncio.run(
