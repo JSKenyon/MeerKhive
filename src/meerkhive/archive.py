@@ -94,7 +94,10 @@ def build_ssl_context(verify: bool) -> ssl.SSLContext:
         transport.
     """
     if not verify:
-        return ssl._create_unverified_context()
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
     ca_bundle = os.getenv("REQUESTS_CA_BUNDLE")
     return (
         ssl.create_default_context(cafile=ca_bundle) if ca_bundle else ssl.create_default_context()
@@ -150,6 +153,8 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"Invalid filter format (expected key=value): {f!r}")
 
         key, val = parts[0].strip(), parts[1].strip()
+        if not key:
+            raise ValueError(f"Invalid filter format (empty key): {f!r}")
 
         if key in JSON_FILTER_FIELDS:
             filters.append({"field": key, "value": json.loads(val)})
@@ -187,6 +192,8 @@ def parse_sort(sort_args: list[str]) -> list[dict[str, str]]:
                 f"Invalid sort format: {entry!r}. Expected 'field:asc' or 'field:desc'."
             )
         field, direction = parts
+        if not field.strip():
+            raise ValueError(f"Invalid sort format (empty field): {entry!r}.")
 
         direction = direction.strip().upper()
         if direction not in ("ASC", "DESC"):
@@ -642,7 +649,7 @@ async def query_archive_async(
                 try:
                     result = await session.execute(query, variable_values=variables)
                 except TransportQueryError as e:
-                    logger.error(e.errors or [])
+                    logger.error(f"GraphQL errors: {e.errors or []}")
                     raise
 
                 records = result["captureBlocks"]["records"]
@@ -650,7 +657,10 @@ async def query_archive_async(
                 all_records.extend(records)
                 fetched += len(records)
 
-                if not page_info["hasNextPage"] or fetched >= limit:
+                # Guard against a broken server that reports hasNextPage=True
+                # but returns no records — without this the cursor never
+                # advances and the loop never terminates.
+                if not records or not page_info["hasNextPage"] or fetched >= limit:
                     break
 
                 cursor = page_info["endCursor"]

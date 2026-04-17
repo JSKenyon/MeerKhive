@@ -97,9 +97,9 @@ def main(
         search=search,
         limit=limit,
         url_format=url_format,
-        filters=filter or [],
+        filters=filter,
         verify_ssl=verify_ssl,
-        sort=sort or [],
+        sort=sort,
     )
 
     for record in records:
