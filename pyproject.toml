@@ -4,7 +4,8 @@ version = "0.0.0"
 description = "Python client for the SARAO MeerKAT archive."
 readme = "README.md"
 authors = [
-    { name = "Jonathan Kenyon", email = "jonathan.simon.kenyon@gmail.com" }
+    { name = "Jonathan Kenyon", email = "jonathan.simon.kenyon@gmail.com" },
+    { name = "Zach Smith", email = "zsmith@sarao.ac.za" },
 ]
 requires-python = ">=3.11"
 dependencies = [
