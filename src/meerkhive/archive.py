@@ -1,7 +1,7 @@
 """GraphQL client for the SARAO MeerKAT archive.
 
 This module is intentionally narrow: it builds a GraphQL selection block by
-introspecting the live schema, paginates through the ``captureBlocks`` root
+introspecting the live schema, paginates through the ``observations`` root
 field, and returns the ``Observation`` records it yields. Authentication is
 delegated entirely to :mod:`meerkhive.auth`.
 
@@ -613,7 +613,7 @@ async def query_archive_async(
                     $sort: [SortColumnInput!]
                 )
                 {{
-                    captureBlocks: observations(
+                    observations(
                         limit: $limit,
                         cursor: $cursor,
                         search: $search,
@@ -652,8 +652,8 @@ async def query_archive_async(
                     logger.error(f"GraphQL errors: {e.errors or []}")
                     raise
 
-                records = result["captureBlocks"]["records"]
-                page_info = result["captureBlocks"]["pageInfo"]
+                records = result["observations"]["records"]
+                page_info = result["observations"]["pageInfo"]
                 all_records.extend(records)
                 fetched += len(records)
 
