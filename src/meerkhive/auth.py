@@ -39,6 +39,7 @@ import logging
 import os
 import secrets
 import socketserver
+import sys
 import tempfile
 import threading
 import time
@@ -423,7 +424,10 @@ def _wait_for_pasted_url(
         done: Event to signal when a URL has been successfully parsed.
     """
     try:
-        line = input().strip()
+        # Use readline() not input() — input() invokes GNU readline, which modifies
+        # terminal attributes and does not restore them if this daemon thread is
+        # killed on process exit, leaving the shell prompt unresponsive.
+        line = sys.stdin.readline().strip()
         if line:
             parsed = urllib.parse.urlparse(line)
             result["query"] = urllib.parse.parse_qs(parsed.query)
