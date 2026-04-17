@@ -80,6 +80,21 @@ def test_build_selection_block_skip_fields_omits_them(observation_type):
     assert "CaptureBlockId" in block
 
 
+def test_build_selection_block_skip_fields_does_not_propagate_to_nested_types(observation_type):
+    """skip_fields is top-level only; nested types with same-named fields are unaffected."""
+    # The fixture's Telescope nested type has "name" and "band".
+    # Skipping "name" at the top level must not drop Telescope.name.
+    block = build_selection_block(observation_type, skip_fields={"name"})
+    assert "telescope {" in block
+    assert "name" in block  # Telescope.name must still appear
+
+
+def test_build_selection_block_unknown_fields_raises(observation_type):
+    """Requesting a field not in the schema raises ValueError immediately."""
+    with pytest.raises(ValueError, match="Unknown field"):
+        build_selection_block(observation_type, fields={"CaptureBlockId", "nonExistent"})
+
+
 def test_build_selection_block_explicit_field_subset(observation_type):
     block = build_selection_block(observation_type, fields={"CaptureBlockId"})
     assert "CaptureBlockId" in block
@@ -100,6 +115,40 @@ def test_build_selection_block_field_overrides_can_be_replaced(observation_type)
     assert "CaptureBlockId @custom" in block
     # Default rdb override is not in effect when overrides are replaced.
     assert "rdb(internal" not in block
+
+
+def test_build_selection_block_omits_nested_field_when_sub_selection_is_empty():
+    """An object field whose sub-selection would be empty is dropped entirely.
+
+    If every field inside a nested type is skipped (e.g. all have required
+    arguments), emitting ``field { }`` would produce invalid GraphQL. The
+    walker must omit the outer field instead.
+    """
+    # A nested type whose only field requires an argument — it will always be skipped.
+    empty_nested = GraphQLObjectType(
+        name="Inner",
+        fields={
+            "guarded": GraphQLField(
+                GraphQLString,
+                args={
+                    "mode": GraphQLArgument(
+                        GraphQLNonNull(GraphQLString),
+                        default_value=Undefined,
+                    ),
+                },
+            ),
+        },
+    )
+    root = GraphQLObjectType(
+        name="Root",
+        fields={
+            "id": GraphQLField(GraphQLString),
+            "inner": GraphQLField(empty_nested),
+        },
+    )
+    block = build_selection_block(root)
+    assert "id" in block
+    assert "inner" not in block
 
 
 # --- Required-argument skip logic ---
@@ -140,40 +189,6 @@ def test_build_selection_block_includes_required_arg_field_with_override(
     block = build_selection_block(type_with_required_arg, field_overrides=overrides)
     assert "simple" in block
     assert 'guarded(mode: "fast")' in block
-
-
-# --- Depth-limit handling for object fields ---
-
-
-def test_build_selection_block_skips_objects_at_depth_limit():
-    """Object fields beyond max_depth are skipped, not emitted as bare names."""
-    leaf = GraphQLObjectType(
-        name="Leaf",
-        fields={"value": GraphQLField(GraphQLString)},
-    )
-    mid = GraphQLObjectType(
-        name="Mid",
-        fields={
-            "label": GraphQLField(GraphQLString),
-            "leaf": GraphQLField(leaf),
-        },
-    )
-    root = GraphQLObjectType(
-        name="Root",
-        fields={
-            "name": GraphQLField(GraphQLString),
-            "mid": GraphQLField(mid),
-        },
-    )
-    # max_depth=1: root fields are processed at depth 0 (0 < 1 so mid
-    # recurses), but inside mid the depth is 1 which equals max_depth —
-    # so "leaf" (an object) must be skipped rather than emitted as a bare
-    # field name (which would be invalid GraphQL).
-    block = build_selection_block(root, max_depth=1)
-    assert "name" in block
-    assert "mid {" in block
-    assert "label" in block
-    assert "leaf" not in block
 
 
 # --- Enum and abstract type handling ---
@@ -303,3 +318,19 @@ def test_parse_sort_invalid_no_separator():
 def test_parse_sort_invalid_direction():
     with pytest.raises(ValueError, match="Invalid sort direction"):
         parse_sort(["StartTime:sideways"])
+
+
+# ---------------------------------------------------------------------------
+# fields / skip_fields interaction
+# ---------------------------------------------------------------------------
+
+
+def test_build_selection_block_skip_fields_wins_over_fields(observation_type):
+    """When a field appears in both fields and skip_fields, skip_fields takes precedence."""
+    block = build_selection_block(
+        observation_type,
+        fields={"CaptureBlockId", "rdb"},
+        skip_fields={"rdb"},
+    )
+    assert "CaptureBlockId" in block
+    assert "rdb" not in block

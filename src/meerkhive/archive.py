@@ -209,11 +209,28 @@ DEFAULT_FIELD_OVERRIDES: dict[str, Callable[[UrlFormat], str]] = {
 }
 
 
+def _check_field_names(names: set[str], gql_type: GraphQLObjectType, param: str) -> None:
+    """Raise :class:`ValueError` if any names are absent from *gql_type*'s fields.
+
+    Args:
+        names: Field names to validate.
+        gql_type: The ``GraphQLObjectType`` whose field map is authoritative.
+        param: The public parameter name to include in the error message.
+
+    Raises:
+        ValueError: If one or more names are not present in the type's fields.
+    """
+    unknown = names - set(gql_type.fields)
+    if unknown:
+        raise ValueError(
+            f"Unknown field(s) in {param!r}: {sorted(unknown)}. "
+            "Field names are case-sensitive. Run `meerkhive --show-fields` to see available names."
+        )
+
+
 def build_selection_block(
     gql_type: GraphQLObjectType,
     *,
-    depth: int = 0,
-    max_depth: int = 3,
     skip_fields: set[str] | None = None,
     fields: set[str] | None = None,
     url_format: UrlFormat = "external",
@@ -223,11 +240,9 @@ def build_selection_block(
 
     Args:
         gql_type: A ``GraphQLObjectType`` to walk.
-        depth: Current recursion depth; callers should always use the default
-            of 0. The parameter exists only to track state across recursive
-            calls.
-        max_depth: Stop recursing into nested object types beyond this depth.
-        skip_fields: Field names to omit entirely.
+        skip_fields: Top-level field names to omit. Silently ignored if a
+            name is not present in the schema; not propagated into nested
+            object types.
         fields: Specific top-level fields to include. ``None`` (the default)
             includes every field the schema exposes. Nested levels always
             include all fields regardless of this setting.
@@ -240,14 +255,47 @@ def build_selection_block(
         braces — the caller wraps it in the outer query).
 
     Raises:
-        ValueError: If ``fields`` is not ``None`` and none of the named
-            fields exist in the schema.
+        ValueError: If ``fields`` is not ``None`` and any of the named
+            fields are not present in the schema.
+    """
+    overrides = field_overrides if field_overrides is not None else DEFAULT_FIELD_OVERRIDES
+    if fields is not None:
+        _check_field_names(fields, gql_type, "fields")
+    return _walk_selection(
+        gql_type,
+        depth=0,
+        skip_fields=skip_fields or set(),
+        fields=fields,
+        url_format=url_format,
+        overrides=overrides,
+    )
+
+
+def _walk_selection(
+    gql_type: GraphQLObjectType,
+    *,
+    depth: int,
+    skip_fields: set[str],
+    fields: set[str] | None,
+    url_format: UrlFormat,
+    overrides: dict[str, Callable[[UrlFormat], str]],
+) -> str:
+    """Recursive helper for :func:`build_selection_block`.
+
+    Args:
+        gql_type: The type whose fields are being walked.
+        depth: Current recursion depth, used solely for indentation.
+        skip_fields: Field names to omit.
+        fields: If not ``None``, only include fields in this set.
+        url_format: Forwarded to field overrides.
+        overrides: Per-field rendering overrides.
+
+    Returns:
+        The (possibly empty) selection lines joined by newlines.
     """
     indent = "  " * (depth + 1)
-    skip_fields = skip_fields or set()
-    overrides = field_overrides if field_overrides is not None else DEFAULT_FIELD_OVERRIDES
-
     lines: list[str] = []
+
     for field_name, field in gql_type.fields.items():
         if field_name in skip_fields:
             continue
@@ -264,10 +312,7 @@ def build_selection_block(
             continue
 
         unwrapped = get_named_type(field.type)
-        if is_object_type(unwrapped) and depth >= max_depth:
-            # Cannot select sub-fields beyond the depth limit; skip rather
-            # than emitting a bare field name which would be invalid GraphQL.
-            continue
+
         if is_abstract_type(unwrapped):
             # Abstract types require inline fragments, which this walker does
             # not yet generate. Skip rather than emit invalid GraphQL; log at
@@ -286,22 +331,18 @@ def build_selection_block(
         if is_leaf_type(unwrapped):
             lines.append(f"{indent}{rendered_name}")
         elif is_object_type(unwrapped):
-            nested = build_selection_block(
+            nested = _walk_selection(
                 unwrapped,
                 depth=depth + 1,
-                max_depth=max_depth,
-                skip_fields=skip_fields,
+                skip_fields=set(),  # skip_fields is a top-level-only concept
                 fields=None,  # always include all nested subfields
                 url_format=url_format,
-                field_overrides=overrides,
+                overrides=overrides,
             )
-            lines.append(f"{indent}{rendered_name} {{\n{nested}\n{indent}}}")
-
-    if not lines and depth == 0 and fields is not None:
-        raise ValueError(
-            f"None of the requested fields {fields!r} matched the schema. "
-            "Field names are case-sensitive. Run `meerkhive --show-fields` to see available names."
-        )
+            # Only emit the sub-selection if it's non-empty; an empty block
+            # would produce invalid GraphQL (``field { }``).
+            if nested:
+                lines.append(f"{indent}{rendered_name} {{\n{nested}\n{indent}}}")
 
     return "\n".join(lines)
 
@@ -436,7 +477,7 @@ async def fetch_fields_async(
                 "The archive schema does not define an 'Observation' object type. "
                 "The schema may have changed or failed to load correctly."
             )
-        return build_selection_block(observation_type, max_depth=3, url_format=url_format)
+        return build_selection_block(observation_type, url_format=url_format)
 
 
 async def query_archive_async(
@@ -534,7 +575,6 @@ async def query_archive_async(
 
             selection_block = build_selection_block(
                 observation_type,
-                max_depth=3,
                 skip_fields=skip_fields,
                 fields=requested_fields,
                 url_format=url_format,
