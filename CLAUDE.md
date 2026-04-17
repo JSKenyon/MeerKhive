@@ -13,17 +13,18 @@ ruff check . && ruff format .    # Lint and format
 pytest                           # Run tests
 ```
 
-## Architecture
+## Modules
 
-Three modules under `src/meerkhive/`:
+`src/meerkhive/` contains four modules:
 
-- **[auth.py](src/meerkhive/auth.py)** — `KeycloakAuth` dataclass + `get_access_token()`. Tokens persisted at `~/.local/state/meerkhive/tokens.json` (honours `XDG_STATE_HOME`). PKCE loopback + paste fallback; token refresh on 401.
-- **[archive.py](src/meerkhive/archive.py)** — `query_archive` / `query_archive_async`, `build_selection_block`, `parse_filters`, `parse_sort`, `AuthenticatedTransport`, `build_ssl_context`.
-- **[cli.py](src/meerkhive/cli.py)** — Typer CLI; thin wrapper over `query_archive_async`. Options: `--fields`, `--exclude-fields`, `--filter`, `--sort`, `--url-format`, `--show-fields`, `--verify-ssl`.
-- **[\_\_init\_\_.py](src/meerkhive/__init__.py)** — re-exports public API only.
+- **auth.py** — PKCE OAuth2 login, token refresh, and token persistence (`~/.local/state/meerkhive/tokens.json`). Public entry point: `get_access_token()`.
+- **archive.py** — GraphQL client. Introspects the live `Observation` schema to build a selection block, paginates results, and handles bearer token injection with 401 retry. Public entry points: `query_archive()` / `query_archive_async()`.
+- **cli.py** — Typer CLI wrapping `query_archive`. Options: `--fields`, `--exclude-fields`, `--filter`, `--sort`, `--search`, `--limit`, `--url-format`, `--show-fields`, `--verify-ssl`.
+- **\_\_init\_\_.py** — re-exports public API only.
 
-**Data flow**: `main()` → `query_archive_async()` → `AuthenticatedTransport` (injects bearer token, retries on 401) → introspects `Observation` type via `build_selection_block()` → paginates `observations` cursor → prints NDJSON to stdout. Logs go to stderr.
+## Key Behaviours
 
-**GraphQL query building**: `build_selection_block()` walks the live `Observation` type to depth 3. Skips fields with required args unless an override exists. `DEFAULT_FIELD_OVERRIDES` handles `rdb(internal: bool)`.
-
-**Filters**: `parse_filters()` maps `key=value` args to `[{field, value}]`. Special cases: `radec` → JSON-parsed dict; `Band`, `QA2`, `NumFreqChannels` → comma-split lists. All other keys pass through as plain strings.
+- Schema is introspected at runtime; field names are discovered dynamically. Use `--show-fields` to list them.
+- Filters: `key=value` pairs; some keys are JSON-parsed (`dateRange`, `radec`) or comma-split lists (`Band`, `QA2`, `NumFreqChannels`).
+- `--url-format internal|external` controls whether URL-valued fields resolve inside SARAO or via the public internet.
+- SSL verification can be overridden via `--no-verify-ssl`; the `REQUESTS_CA_BUNDLE` env var applies to both `requests` and `aiohttp`.
