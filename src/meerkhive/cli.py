@@ -5,7 +5,6 @@ NDJSON to stdout so the output is pipeable to ``jq``, ``grep``, etc.
 All logs go to stderr.
 """
 
-import asyncio
 import json
 import logging
 import sys
@@ -16,7 +15,7 @@ import typer
 from meerkhive.archive import (
     fetch_fields,
     parse_filters,
-    query_archive_async,
+    query_archive,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,18 +96,16 @@ def main(
         print(fetch_fields(auth_address=auth_address, verify_ssl=verify_ssl))
         return
 
-    records = asyncio.run(
-        query_archive_async(
-            auth_address=auth_address,
-            fields=fields,
-            exclude_fields=exclude_fields,
-            search=search,
-            limit=limit,
-            url_format=url_format,
-            filters=parsed_filters,
-            verify_ssl=verify_ssl,
-            sort=sort or [],
-        )
+    records = query_archive(
+        auth_address=auth_address,
+        fields=fields,
+        exclude_fields=exclude_fields,
+        search=search,
+        limit=limit,
+        url_format=url_format,
+        filters=parsed_filters,
+        verify_ssl=verify_ssl,
+        sort=sort or [],
     )
 
     for record in records:
