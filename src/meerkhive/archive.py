@@ -105,6 +105,10 @@ def build_ssl_context(verify: bool) -> ssl.SSLContext:
 # Filter and sort parsing
 # ---------------------------------------------------------------------------
 
+# The root GraphQL object type that represents a single telescope observation.
+# Defined here so a schema rename only requires one edit.
+OBSERVATION_TYPE: str = "Observation"
+
 # Filter keys whose string value should be parsed as a JSON object (e.g. a
 # coordinate dict or a date-range array). Extend this set when the schema adds
 # further JSON-valued filter fields.
@@ -468,10 +472,10 @@ async def fetch_fields_async(
         ssl_context=build_ssl_context(verify=verify_ssl),
     )
     async with Client(transport=transport, fetch_schema_from_transport=True) as session:
-        observation_type = session.client.schema.get_type("Observation")
+        observation_type = session.client.schema.get_type(OBSERVATION_TYPE)
         if not isinstance(observation_type, GraphQLObjectType):
             raise RuntimeError(
-                "The archive schema does not define an 'Observation' object type. "
+                f"The archive schema does not define an '{OBSERVATION_TYPE}' object type. "
                 "The schema may have changed or failed to load correctly."
             )
         return build_selection_block(observation_type)
@@ -575,10 +579,10 @@ async def query_archive_async(
     try:
         async with Client(transport=transport, fetch_schema_from_transport=True) as session:
             schema = session.client.schema
-            observation_type = schema.get_type("Observation")
+            observation_type = schema.get_type(OBSERVATION_TYPE)
             if not isinstance(observation_type, GraphQLObjectType):
                 raise RuntimeError(
-                    "The archive schema does not define an 'Observation' object type. "
+                    f"The archive schema does not define an '{OBSERVATION_TYPE}' object type. "
                     "The schema may have changed or failed to load correctly."
                 )
 
