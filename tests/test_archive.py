@@ -228,6 +228,45 @@ def test_build_selection_block_skips_interface_fields():
     assert "node" not in block
 
 
+def test_build_selection_block_breaks_self_referential_cycle():
+    """A type that references itself (directly or transitively) must not recurse forever.
+
+    The live archive schema exposes ``Observation -> Proposal -> KeycloakGroup``,
+    where ``KeycloakGroup`` has a ``subGroups: [KeycloakGroup]`` field. Without
+    cycle detection the walker would hit Python's recursion limit. The walker
+    must break the cycle by skipping the back-reference while still emitting
+    the leaf fields of the recursing type.
+    """
+    # Build a type that references itself via a list field. We construct the
+    # field lazily because GraphQLObjectType's fields thunk is the only way
+    # to express self-reference at construction time.
+    group: GraphQLObjectType
+    group = GraphQLObjectType(
+        name="KeycloakGroup",
+        fields=lambda: {
+            "id": GraphQLField(GraphQLString),
+            "name": GraphQLField(GraphQLString),
+            "subGroups": GraphQLField(GraphQLList(group)),
+        },
+    )
+    root = GraphQLObjectType(
+        name="Observation",
+        fields={
+            "CaptureBlockId": GraphQLField(GraphQLString),
+            "group": GraphQLField(group),
+        },
+    )
+
+    block = build_selection_block(root)
+
+    # The outer group field is emitted with its leaf fields, but the
+    # self-referential subGroups field is skipped to break the cycle.
+    assert "CaptureBlockId" in block
+    assert "group {" in block
+    assert "id" in block and "name" in block
+    assert "subGroups" not in block
+
+
 def test_build_selection_block_skips_union_fields():
     """Union-typed fields are skipped — they need inline fragments."""
     member = GraphQLObjectType("Member", fields={"value": GraphQLField(GraphQLString)})
