@@ -280,6 +280,7 @@ def build_selection_block(
         fields=fields,
         url_format=url_format,
         overrides=overrides,
+        ancestors=frozenset(),
     )
 
 
@@ -291,6 +292,7 @@ def _walk_selection(
     fields: set[str] | None,
     url_format: UrlFormat,
     overrides: dict[str, Callable[[UrlFormat], str]],
+    ancestors: frozenset[str],
 ) -> str:
     """Recursive helper for :func:`build_selection_block`.
 
@@ -301,12 +303,18 @@ def _walk_selection(
         fields: If not ``None``, only include fields in this set.
         url_format: Forwarded to field overrides.
         overrides: Per-field rendering overrides.
+        ancestors: Names of object types strictly above ``gql_type`` on
+            the current recursion path. A field whose unwrapped type is
+            already visited (an ancestor or ``gql_type`` itself) is skipped
+            to prevent infinite recursion through a self-referential schema
+            (e.g. Keycloak groups with ``subGroups: [KeycloakGroup]``).
 
     Returns:
         The (possibly empty) selection lines joined by newlines.
     """
     indent = "  " * (depth + 1)
     lines: list[str] = []
+    visited = ancestors | {gql_type.name}
 
     for field_name, field in gql_type.fields.items():
         if field_name in skip_fields:
@@ -343,6 +351,15 @@ def _walk_selection(
         if is_leaf_type(unwrapped):
             lines.append(f"{indent}{rendered_name}")
         elif is_object_type(unwrapped):
+            # Break cycles in self-referential schemas. Without this guard a
+            # type like ``KeycloakGroup`` with a ``subGroups: [KeycloakGroup]``
+            # field would recurse forever.
+            if unwrapped.name in visited:
+                logger.debug(
+                    f"Skipping field {field_name!r}: would recurse back into "
+                    f"already-visited type {unwrapped.name!r}."
+                )
+                continue
             nested = _walk_selection(
                 unwrapped,
                 depth=depth + 1,
@@ -350,6 +367,7 @@ def _walk_selection(
                 fields=None,  # always include all nested subfields
                 url_format=url_format,
                 overrides=overrides,
+                ancestors=visited,
             )
             # Only emit the sub-selection if it's non-empty; an empty block
             # would produce invalid GraphQL (``field { }``).
