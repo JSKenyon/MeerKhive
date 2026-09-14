@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 import typer
 
-from meerkhive.archive import fetch_fields, query_archive
+from meerkhive.archive import fetch_fields, parse_filters, parse_sort, query_archive
 from meerkhive.pagination import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_PAGE_TIMEOUT,
@@ -115,14 +115,19 @@ def main(
         print(fetch_fields(auth_address=auth_address, verify_ssl=verify_ssl))
         return
 
-    # Report bad option values as usage errors rather than tracebacks. This
-    # deliberately wraps only the validators: a ValueError from the query
-    # itself (requests raises JSONDecodeError, a ValueError, when the auth
-    # server returns an HTML error page) is an outage, not a usage error.
+    # Report bad option values as usage errors rather than tracebacks. Only
+    # code that inspects what the user typed belongs in here: a ValueError
+    # from the query itself (requests raises JSONDecodeError, a ValueError,
+    # when the auth server returns an HTML error page) is an outage, not a bad
+    # command line. The two parsers qualify — they are pure functions over the
+    # option strings — so the results are discarded and query_archive parses
+    # the same strings again, which costs nothing worth measuring.
     try:
         validate_limit(limit)
         validate_page_size(page_size)
         validate_page_timeout(page_timeout)
+        parse_filters(filter or [])
+        parse_sort(sort or [])
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
 

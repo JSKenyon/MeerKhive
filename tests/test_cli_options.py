@@ -55,7 +55,12 @@ def test_query_archive_rejects_a_bad_page_size_before_touching_the_network() -> 
 
 @pytest.mark.parametrize(
     ("option", "value"),
-    [("--page-size", "0"), ("--page-timeout", "0"), ("--limit", "0"), ("--limit", "-1")],
+    [
+        ("--page-size", "0"),
+        ("--page-timeout", "0"),
+        ("--limit", "0"),
+        ("--limit", "-1"),
+    ],
 )
 def test_cli_reports_invalid_tuning_options_as_usage_errors(option: str, value: str) -> None:
     # A bad flag should read as a usage error, not a Python traceback.
@@ -79,3 +84,24 @@ def test_cli_does_not_disguise_runtime_failures_as_usage_errors(
 
     assert result.exit_code != 2
     assert "Invalid value" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "expected"),
+    [
+        pytest.param("--filter", "Band", "key=value", id="filter-without-a-separator"),
+        pytest.param("--filter", "=L", "empty key", id="filter-with-an-empty-key"),
+        pytest.param("--filter", "dateRange=[bad", "dateRange", id="filter-with-invalid-json"),
+        pytest.param("--sort", "StartTime", "Invalid sort format", id="sort-without-a-direction"),
+        pytest.param("--sort", "StartTime:sideways", "asc", id="sort-with-a-bad-direction"),
+    ],
+)
+def test_cli_reports_malformed_filters_and_sorts_as_usage_errors(
+    option: str, value: str, expected: str
+) -> None:
+    # These are all typed on the command line, so they are usage errors rather
+    # than the traceback they used to produce.
+    result = runner.invoke(cli.app, [option, value])
+
+    assert result.exit_code == 2
+    assert expected in result.output

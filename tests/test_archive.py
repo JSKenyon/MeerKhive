@@ -373,3 +373,9 @@ def test_build_selection_block_skip_fields_wins_over_fields(observation_type):
     )
     assert "CaptureBlockId" in block
     assert "rdb" not in block
+
+
+def test_parse_filters_names_the_key_when_its_json_is_malformed():
+    # json.loads' own message says nothing about which filter was at fault.
+    with pytest.raises(ValueError, match="dateRange"):
+        parse_filters(["dateRange=[bad"])

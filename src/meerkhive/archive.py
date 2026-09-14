@@ -156,7 +156,8 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
         as the ``filters`` variable to the archive GraphQL query.
 
     Raises:
-        ValueError: If an entry cannot be split into a key-value pair.
+        ValueError: If an entry cannot be split into a key-value pair, or if a
+            JSON-valued filter's value is not valid JSON.
     """
     filters: list[dict[str, Any]] = []
 
@@ -170,7 +171,13 @@ def parse_filters(raw_filters: list[str]) -> list[dict[str, Any]]:
             raise ValueError(f"Invalid filter format (empty key): {f!r}")
 
         if key in JSON_FILTER_FIELDS:
-            filters.append({"field": key, "value": json.loads(val)})
+            try:
+                parsed = json.loads(val)
+            except json.JSONDecodeError as e:
+                # json's own message describes a position in an anonymous
+                # string, which is no help when several filters were given.
+                raise ValueError(f"Invalid JSON for filter {key!r}: {val!r}. {e.msg}.") from e
+            filters.append({"field": key, "value": parsed})
         elif key in LIST_FILTER_FIELDS:
             values = [v.strip() for v in val.split(",") if v.strip()]
             if values:
