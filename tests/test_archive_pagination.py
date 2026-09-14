@@ -618,7 +618,10 @@ def test_fetch_all_pages_stops_when_a_next_page_has_no_cursor(
 def test_fetch_all_pages_sends_a_distinct_request_per_page() -> None:
     # gql 4 deprecates passing variable_values to execute, and the shim
     # mutates the shared request, so each page needs its own.
-    seen: list[tuple[int, dict[str, Any] | None]] = []
+    # The request objects themselves are retained rather than their id()s: a
+    # per-page request is garbage by the time the next one is built, and CPython
+    # is free to hand the second one the same address.
+    seen: list[tuple[GraphQLRequest, dict[str, Any] | None]] = []
     pages = [
         make_page([{"id": 1}], has_next=True, cursor="c1", total=2),
         make_page([{"id": 2}], has_next=False, total=2),
@@ -627,12 +630,13 @@ def test_fetch_all_pages_sends_a_distinct_request_per_page() -> None:
     async def respond(
         request: GraphQLRequest, variable_values: dict[str, Any] | None
     ) -> dict[str, Any]:
-        seen.append((id(request), variable_values))
+        seen.append((request, variable_values))
         return pages[len(seen) - 1]
 
     run_fetch(respond, page_size=1, limit=100)
 
-    assert seen[0][0] != seen[1][0], "each page must get its own request object"
+    assert seen[0][0] is not seen[1][0], "each page must get its own request object"
+    assert seen[0][0] is not STUB_REQUEST, "the shared request must not be executed directly"
     assert seen[0][1] is not None and seen[0][1]["cursor"] is None
     assert seen[1][1] is not None and seen[1][1]["cursor"] == "c1"
     assert STUB_REQUEST.variable_values is None, "the shared request must not be mutated"
