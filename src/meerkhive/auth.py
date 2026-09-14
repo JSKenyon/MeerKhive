@@ -276,11 +276,14 @@ def _is_expired(access_token: str | None) -> bool:
         return True
     try:
         exp = _jwt_exp(access_token)
-    except Exception:
-        # Any failure to parse the token (malformed base64url, invalid JSON,
-        # missing/non-integer ``exp`` claim, etc.) means we can't trust it.
-        # Treat it as expired so the caller falls through to a refresh or
-        # interactive login.
+    except (ValueError, KeyError, TypeError):
+        # Any failure to parse the token means we can't trust it, so treat it
+        # as expired and let the caller fall through to a refresh or an
+        # interactive login. The three types cover every way _jwt_exp can fail:
+        # ValueError for a malformed segment count, bad base64url (binascii
+        # raises a ValueError subclass), invalid JSON or a non-integer ``exp``;
+        # KeyError for a payload with no ``exp``; TypeError for a payload that
+        # is not a mapping, or an ``exp`` that is not convertible.
         return True
     return time.time() + _EXP_SKEW_SECONDS >= exp
 
@@ -384,7 +387,8 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
     # reads it after the server shuts down.
     captured_query: dict[str, list[str]] | None = None
 
-    def do_GET(self):  # noqa: N802 — required name for BaseHTTPRequestHandler.
+    # The name is dictated by BaseHTTPRequestHandler's dispatch, not by us.
+    def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         # Stash the result on the *server* (shared between threads) so the
@@ -403,7 +407,7 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args):  # noqa: A002, ARG002
+    def log_message(self, format, *args):
         # Silence the default stderr access log — it is noise in the CLI.
         return
 

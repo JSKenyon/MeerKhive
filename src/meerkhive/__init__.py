@@ -32,18 +32,16 @@ from meerkhive.archive import (
 from meerkhive.auth import KeycloakAuth, get_access_token
 
 __all__ = [
-    # Archive / query
     "AuthenticatedTransport",
+    "KeycloakAuth",
     "UrlFormat",
     "build_selection_block",
     "build_ssl_context",
     "fetch_fields",
     "fetch_fields_async",
+    "get_access_token",
     "parse_filters",
     "parse_sort",
     "query_archive",
     "query_archive_async",
-    # Auth
-    "KeycloakAuth",
-    "get_access_token",
 ]

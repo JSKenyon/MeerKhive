@@ -21,7 +21,7 @@ dev = [
     "pre-commit>=4.3.0",
     "pytest>=8.0",
     "responses>=0.25.7",
-    "ruff>=0.12.9",
+    "ruff>=0.16.7",
 ]
 
 [tool.uv]
@@ -34,12 +34,21 @@ meerkhive = "meerkhive.cli:app"
 requires = ["uv_build>=0.8.6,<0.9.0"]
 build-backend = "uv_build"
 
+# Ruff configuration lives here rather than in a ruff.toml: a ruff.toml would
+# take precedence over this section, and having both meant the settings below
+# were silently ignored.
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Ruff 0.16 began formatting Python inside Markdown code blocks. The README's
+# examples are written for readability rather than to the formatter's taste, so
+# they are left alone; drop this to opt in.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
-select = ["E501", "I", "F", "E", "W"]
+# Extend ruff's default rule set rather than replacing it. Only E501 is absent
+# from the defaults; I (isort) is listed to keep the intent explicit.
+extend-select = ["E501", "I"]
 
 [tool.pytest.ini_options]
 markers = [

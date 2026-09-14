@@ -7,6 +7,7 @@ exercised end-to-end (it would require a real browser); we instead patch
 when refresh fails.
 """
 
+import base64
 import json
 import os
 import time
@@ -86,6 +87,27 @@ def test_is_expired_applies_skew():
 
 def test_is_expired_handles_malformed_token():
     assert _is_expired("clearly.not.a.jwt") is True
+
+
+def _token_with_payload(payload: object) -> str:
+    """Build a JWT whose payload segment is the given object, valid or not."""
+    header = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"{header}.{body}.signature"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"sub": "someone"}, id="no-exp-claim"),
+        pytest.param(["not", "a", "mapping"], id="payload-is-not-a-mapping"),
+        pytest.param({"exp": "soon"}, id="exp-is-not-a-number"),
+    ],
+)
+def test_is_expired_treats_an_unusable_payload_as_expired(payload: object):
+    # These three reach _is_expired's handler as KeyError, TypeError and
+    # ValueError respectively, which is why it catches that exact trio.
+    assert _is_expired(_token_with_payload(payload)) is True
 
 
 # ---------------------------------------------------------------------------
