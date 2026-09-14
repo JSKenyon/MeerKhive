@@ -71,8 +71,8 @@ UrlFormat = Literal["internal", "external"]
 __all__ = [
     "AuthenticatedTransport",
     "UrlFormat",
-    "build_ssl_context",
     "build_selection_block",
+    "build_ssl_context",
     "fetch_fields",
     "fetch_fields_async",
     "parse_filters",
@@ -876,8 +876,12 @@ async def fetch_fields_async(
     )
     async with Client(transport=transport, fetch_schema_from_transport=True) as session:
         observation_type = session.client.schema.get_type(OBSERVATION_TYPE)
+        # TRY004 wants a TypeError here, but nobody passed us a bad type: the
+        # live schema is missing a type it is supposed to define, which is an
+        # environment failure. The isinstance check is how that is detected and
+        # how the type is narrowed for build_selection_block.
         if not isinstance(observation_type, GraphQLObjectType):
-            raise RuntimeError(
+            raise RuntimeError(  # noqa: TRY004
                 f"The archive schema does not define an '{OBSERVATION_TYPE}' object type. "
                 "The schema may have changed or failed to load correctly."
             )
@@ -1027,8 +1031,10 @@ async def query_archive_async(
         ) as session:
             schema = session.client.schema
             observation_type = schema.get_type(OBSERVATION_TYPE)
+            # See the matching note in fetch_fields_async: a missing schema type
+            # is an environment failure, not a caller passing the wrong type.
             if not isinstance(observation_type, GraphQLObjectType):
-                raise RuntimeError(
+                raise RuntimeError(  # noqa: TRY004
                     f"The archive schema does not define an '{OBSERVATION_TYPE}' object type. "
                     "The schema may have changed or failed to load correctly."
                 )

@@ -79,7 +79,7 @@ def main(
         Literal["internal", "external"],
         typer.Option(help="URL format for link-valued fields: 'internal' or 'external'."),
     ] = "external",
-    filter: Annotated[  # noqa: A002 — mirrors the CLI flag name
+    filter: Annotated[  # Shadows the builtin deliberately: it mirrors the CLI flag name.
         list[str] | None,
         typer.Option(
             "--filter",
