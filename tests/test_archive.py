@@ -63,14 +63,16 @@ def test_build_selection_block_includes_all_fields_by_default(observation_type):
     assert "name" in block and "band" in block
 
 
-def test_build_selection_block_external_renders_rdb_internal_false(observation_type):
-    block = build_selection_block(observation_type, url_format="external")
-    assert "rdb(internal: false)" in block
+def test_build_selection_block_selects_rdb_without_the_deprecated_argument(observation_type):
+    """``rdb`` is selected bare; its ``internal`` argument is being deprecated.
 
-
-def test_build_selection_block_internal_renders_rdb_internal_true(observation_type):
-    block = build_selection_block(observation_type, url_format="internal")
-    assert "rdb(internal: true)" in block
+    The archive returns the same URL for ``internal: true``, ``internal: false``
+    and no argument at all, so sending one buys nothing and would break the
+    query outright once the argument leaves the schema.
+    """
+    block = build_selection_block(observation_type)
+    assert "  rdb\n" in block
+    assert "internal" not in block
 
 
 def test_build_selection_block_skip_fields_omits_them(observation_type):
@@ -110,11 +112,11 @@ def test_build_selection_block_none_means_all(observation_type):
 
 
 def test_build_selection_block_field_overrides_can_be_replaced(observation_type):
-    custom = {"CaptureBlockId": lambda _fmt: "CaptureBlockId @custom"}
+    custom = {"CaptureBlockId": "CaptureBlockId @custom"}
     block = build_selection_block(observation_type, field_overrides=custom)
     assert "CaptureBlockId @custom" in block
-    # Default rdb override is not in effect when overrides are replaced.
-    assert "rdb(internal" not in block
+    # A field with no override still renders as its bare name.
+    assert "  rdb\n" in block
 
 
 def test_build_selection_block_omits_nested_field_when_sub_selection_is_empty():
@@ -185,7 +187,7 @@ def test_build_selection_block_includes_required_arg_field_with_override(
     type_with_required_arg,
 ):
     """An explicit field_overrides entry allows a required-arg field through."""
-    overrides = {"guarded": lambda _fmt: 'guarded(mode: "fast")'}
+    overrides = {"guarded": 'guarded(mode: "fast")'}
     block = build_selection_block(type_with_required_arg, field_overrides=overrides)
     assert "simple" in block
     assert 'guarded(mode: "fast")' in block

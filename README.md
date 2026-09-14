@@ -8,36 +8,39 @@ NDJSON to stdout so the output is pipeable to `jq`, `grep`, and similar tools.
 ## Requirements
 
 - Python ≥ 3.11
-- [uv](https://docs.astral.sh/uv/)
-- A SARAO archive account (required at runtime for authentication)
+- A SARAO archive account, for authentication at runtime
+- [uv](https://docs.astral.sh/uv/), only to work on MeerKhive itself
 
 ## Installation
 
+MeerKhive is published on [PyPI](https://pypi.org/project/meerkhive/):
+
+```bash
+uv pip install meerkhive        # or: pip install meerkhive
+```
+
+To add it as a dependency of another project:
+
+```bash
+uv add meerkhive
+```
+
+Either way the `meerkhive` command is installed alongside the library:
+
+```bash
+meerkhive --help
+```
+
 ### From source
+
+For an unreleased change, or to work on MeerKhive itself:
 
 ```bash
 git clone https://github.com/JSKenyon/MeerKhive.git
 cd MeerKhive
 uv sync
-```
-
-The CLI entry point is then available inside the project's virtual environment:
-
-```bash
 source .venv/bin/activate
 meerkhive --help
-```
-
-### As a dependency in another project
-
-```bash
-uv add git+https://github.com/JSKenyon/MeerKhive.git
-```
-
-or, with `uv pip` in an existing environment:
-
-```bash
-uv pip install git+https://github.com/JSKenyon/MeerKhive.git
 ```
 
 ## Authentication
@@ -63,11 +66,16 @@ export XDG_STATE_HOME=/custom/state
 meerkhive --limit 10
 
 # Select specific fields only
-meerkhive --fields CaptureBlockId,StartTime,Band --limit 10
+meerkhive --fields CaptureBlockId,StartTime,band --limit 10
 
-# Exclude noisy fields from the default full selection
-meerkhive --exclude-fields products,FileSize --limit 20
+# Exclude the bulky nested blocks from the default full selection
+meerkhive --exclude-fields missingItems,exports,beamformedProducts --limit 20
 ```
+
+Field names are case-sensitive and come from the live schema, so check them with
+`--show-fields` rather than guessing. Note that they are a different namespace from
+filter keys: the band of an observation is selected as `band` but filtered on as
+`Band`.
 
 ### Filtering
 
@@ -120,16 +128,7 @@ they compose naturally with `jq`:
 meerkhive --fields CaptureBlockId,StartTime --limit 5 | jq '{id: .CaptureBlockId, start: .StartTime}'
 
 # Count by band
-meerkhive --fields Band --limit 500 | jq -r '.Band' | sort | uniq -c | sort -rn
-```
-
-### Internal URLs (SARAO network)
-
-By default, URL-valued fields (e.g. `rdb`) are rendered as public internet URLs.
-On the SARAO internal network, pass `--url-format internal` to get intranet URLs instead:
-
-```bash
-meerkhive --url-format internal --limit 5
+meerkhive --fields band --limit 500 | jq -r '.band' | sort | uniq -c | sort -rn
 ```
 
 ### Pagination and timeouts
@@ -147,11 +146,10 @@ meerkhive --page-size 25 --limit 500
 `--page-timeout` sets the deadline for a single page request in seconds (default 120);
 it bounds each request, not the query as a whole. It applies to both the GraphQL client
 and the underlying HTTP session, so values above aiohttp's own 300 s default take effect
-rather than being silently capped. Archive latency is highly variable, so
-a page that would previously have failed is now attempted up to three times in total —
-the initial request plus two retries — with exponential backoff. Connection failures and
-5xx responses are retried on the same terms. Progress is reported on stderr, leaving
-stdout clean for `jq`:
+rather than being silently capped. Archive latency is highly variable, so each page is
+attempted up to three times in total — the initial request plus two retries — with
+exponential backoff. Connection failures and 5xx responses are retried on the same
+terms. Progress is reported on stderr, leaving stdout clean for `jq`:
 
 ```bash
 meerkhive --page-timeout 60 --limit 2000 > observations.ndjson
@@ -171,7 +169,7 @@ meerkhive --no-verify-ssl --auth-address https://dev.archive.example.com --limit
 from meerkhive import query_archive
 
 records = query_archive(
-    fields="CaptureBlockId,StartTime,Band",
+    fields="CaptureBlockId,StartTime,band",
     limit=10,
 )
 for r in records:
@@ -202,7 +200,7 @@ from meerkhive import query_archive_async
 
 async def main() -> None:
     records = await query_archive_async(
-        fields="CaptureBlockId,Band,IntegrationTime",
+        fields="CaptureBlockId,band,IntegrationTime",
         filters=["Band=L,UHF"],
         sort=["StartTime:desc"],
         limit=100,
@@ -243,20 +241,38 @@ filters = parse_filters([
 For full control over the GraphQL session (e.g. adding custom middleware):
 
 ```python
-from meerkhive import AuthenticatedTransport, KeycloakAuth, build_ssl_context
+import asyncio
+
 from gql.client import Client
 
-auth = KeycloakAuth.default()
-transport = AuthenticatedTransport(
-    url="https://archive.sarao.ac.za/graphql",
-    auth=auth,
-    ssl_context=build_ssl_context(verify=True),
-)
+from meerkhive import AuthenticatedTransport, KeycloakAuth, build_ssl_context
 
-async with Client(transport=transport, fetch_schema_from_transport=True) as session:
-    # Execute arbitrary GraphQL queries against the archive.
-    ...
+
+async def main() -> None:
+    auth = KeycloakAuth.default()
+    transport = AuthenticatedTransport(
+        url="https://archive.sarao.ac.za/graphql",
+        auth=auth,
+        ssl_context=build_ssl_context(verify=True),
+        # Optional; without it aiohttp caps a request at its own 300 s default.
+        request_timeout=120.0,
+    )
+
+    async with Client(
+        transport=transport,
+        fetch_schema_from_transport=True,
+        execute_timeout=120.0,
+    ) as session:
+        # Execute arbitrary GraphQL queries against the archive.
+        ...
+
+
+asyncio.run(main())
 ```
+
+Going this route means opting out of the retry, page-size and progress handling that
+`query_archive` provides; `meerkhive.pagination.fetch_all_pages` can be used against
+the session above if you want to keep the pagination but write the query yourself.
 
 ## Developer setup
 
