@@ -253,16 +253,18 @@ def test_fetch_page_warns_about_each_retry(
     ) -> dict[str, Any]:
         raise TimeoutError
 
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
-        with pytest.raises(TimeoutError):
-            run_fetch_page(respond, max_attempts=2)
+    with (
+        caplog.at_level(logging.WARNING, logger="meerkhive.archive"),
+        pytest.raises(TimeoutError),
+    ):
+        run_fetch_page(respond, max_attempts=2)
 
     assert any("retrying" in r.message for r in caplog.records)
 
 
 def test_fetch_page_retries_connection_failures(instant_backoff: None) -> None:
-    # gql wraps every non-TransportError - a TCP reset, a dropped connection,
-    # a DNS blip - as TransportConnectionFailed, so this is the transient
+    # gql wraps every non-TransportError — a TCP reset, a dropped connection,
+    # a DNS blip — as TransportConnectionFailed, so this is the transient
     # class a long walk is most likely to hit.
     attempts = 0
 
@@ -514,7 +516,7 @@ def test_heartbeat_reports_while_an_operation_is_still_running(
 def test_heartbeat_stays_quiet_when_the_operation_is_fast(caplog: pytest.LogCaptureFixture) -> None:
     async def fast_operation() -> None:
         async with heartbeat("page 1", interval=10):
-            return None
+            pass
 
     with caplog.at_level(logging.INFO, logger="meerkhive.archive"):
         asyncio.run(fast_operation())
