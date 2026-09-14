@@ -12,12 +12,11 @@ from typing import Annotated, Literal
 
 import typer
 
-from meerkhive.archive import (
+from meerkhive.archive import fetch_fields, query_archive
+from meerkhive.pagination import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_PAGE_TIMEOUT,
     MAX_PAGE_SIZE,
-    fetch_fields,
-    query_archive,
     validate_limit,
     validate_page_size,
     validate_page_timeout,

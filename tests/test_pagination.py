@@ -20,27 +20,25 @@ from gql.transport.exceptions import (
     TransportServerError,
 )
 
-from meerkhive import archive
-from meerkhive.archive import (
+from meerkhive import archive, pagination
+from meerkhive.archive import AuthenticatedTransport, build_ssl_context, query_archive
+from meerkhive.auth import KeycloakAuth
+from meerkhive.pagination import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
-    AuthenticatedTransport,
-    build_ssl_context,
     cancel_and_wait,
     compute_retry_delay,
     fetch_all_pages,
     fetch_page,
     heartbeat,
     is_retryable,
-    query_archive,
     validate_limit,
     validate_max_attempts,
     validate_page_size,
     validate_page_timeout,
     warn_if_page_size_exceeds_cap,
 )
-from meerkhive.auth import KeycloakAuth
 
 # The shape of the coroutine each stub session answers with.
 Responder = Callable[..., Awaitable[dict[str, Any]]]
@@ -97,7 +95,7 @@ def make_page(
 @pytest.fixture
 def instant_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """Collapse the retry backoff so tests that retry do not wait in real time."""
-    monkeypatch.setattr(archive, "INITIAL_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(pagination, "INITIAL_RETRY_DELAY_SECONDS", 0.0)
 
 
 def run_fetch_page(
@@ -254,7 +252,7 @@ def test_fetch_page_warns_about_each_retry(
         raise TimeoutError
 
     with (
-        caplog.at_level(logging.WARNING, logger="meerkhive.archive"),
+        caplog.at_level(logging.WARNING, logger="meerkhive.pagination"),
         pytest.raises(TimeoutError),
     ):
         run_fetch_page(respond, max_attempts=2)
@@ -404,7 +402,7 @@ def test_fetch_all_pages_truncates_when_the_server_over_returns(
     ) -> dict[str, Any]:
         return make_page([{"id": i} for i in range(100)], has_next=False)
 
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         records = run_fetch(respond, page_size=10, limit=25)
 
     assert len(records) == 25
@@ -419,7 +417,7 @@ def test_fetch_all_pages_does_not_warn_when_the_server_honours_the_limit(
     ) -> dict[str, Any]:
         return make_page([{"id": 1}], has_next=False)
 
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         records = run_fetch(respond, page_size=10, limit=25)
 
     assert records == [{"id": 1}]
@@ -440,7 +438,7 @@ def test_fetch_all_pages_logs_progress_against_the_total(caplog: pytest.LogCaptu
         calls += 1
         return pages[calls - 1]
 
-    with caplog.at_level(logging.INFO, logger="meerkhive.archive"):
+    with caplog.at_level(logging.INFO, logger="meerkhive.pagination"):
         run_fetch(respond, page_size=1, limit=100)
 
     assert any("1/2" in r.message for r in caplog.records)
@@ -455,7 +453,7 @@ def test_validate_page_size_does_not_warn_about_the_cap(
 ) -> None:
     # Validation must stay side-effect free: the CLI validates too, so a
     # warning here would be emitted twice for one command.
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         validate_page_size(500)
 
     assert caplog.records == []
@@ -464,7 +462,7 @@ def test_validate_page_size_does_not_warn_about_the_cap(
 def test_warn_if_page_size_exceeds_cap_warns_above_the_cap(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         warn_if_page_size_exceeds_cap(500)
 
     assert any("100" in r.message for r in caplog.records)
@@ -473,7 +471,7 @@ def test_warn_if_page_size_exceeds_cap_warns_above_the_cap(
 def test_warn_if_page_size_exceeds_cap_is_quiet_at_the_cap(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         warn_if_page_size_exceeds_cap(MAX_PAGE_SIZE)
 
     assert caplog.records == []
@@ -507,7 +505,7 @@ def test_heartbeat_reports_while_an_operation_is_still_running(
         async with heartbeat("page 1", interval=0.01):
             await asyncio.sleep(0.05)
 
-    with caplog.at_level(logging.INFO, logger="meerkhive.archive"):
+    with caplog.at_level(logging.INFO, logger="meerkhive.pagination"):
         asyncio.run(slow_operation())
 
     assert any("still waiting" in r.message.lower() for r in caplog.records)
@@ -518,7 +516,7 @@ def test_heartbeat_stays_quiet_when_the_operation_is_fast(caplog: pytest.LogCapt
         async with heartbeat("page 1", interval=10):
             pass
 
-    with caplog.at_level(logging.INFO, logger="meerkhive.archive"):
+    with caplog.at_level(logging.INFO, logger="meerkhive.pagination"):
         asyncio.run(fast_operation())
 
     assert not any("still waiting" in r.message.lower() for r in caplog.records)
@@ -609,7 +607,7 @@ def test_fetch_all_pages_stops_when_a_next_page_has_no_cursor(
         cursors.append(variable_values["cursor"])
         return make_page([{"id": len(cursors)}], has_next=True, cursor=None, total=100)
 
-    with caplog.at_level(logging.WARNING, logger="meerkhive.archive"):
+    with caplog.at_level(logging.WARNING, logger="meerkhive.pagination"):
         records = run_fetch(respond, page_size=1, limit=5)
 
     assert cursors == [None]
