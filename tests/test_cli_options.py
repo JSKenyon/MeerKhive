@@ -9,7 +9,8 @@ import pytest
 from typer.testing import CliRunner
 
 from meerkhive import cli
-from meerkhive.archive import DEFAULT_PAGE_SIZE, DEFAULT_PAGE_TIMEOUT, query_archive
+from meerkhive.archive import query_archive
+from meerkhive.pagination import DEFAULT_PAGE_SIZE, DEFAULT_PAGE_TIMEOUT
 
 runner = CliRunner()
 

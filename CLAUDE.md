@@ -15,10 +15,11 @@ pytest                           # Run tests
 
 ## Modules
 
-`src/meerkhive/` contains four modules:
+`src/meerkhive/` contains five modules:
 
 - **auth.py** — PKCE OAuth2 login, token refresh, and token persistence (`~/.local/state/meerkhive/tokens.json`). Public entry point: `get_access_token()`.
-- **archive.py** — GraphQL client. Introspects the live `Observation` schema to build a selection block, paginates results, and handles bearer token injection with 401 retry. Public entry points: `query_archive()` / `query_archive_async()`.
+- **archive.py** — GraphQL client. Introspects the live `Observation` schema to build a selection block, opens the session, and handles bearer token injection with 401 retry. Delegates the result walk to `pagination.py`. Public entry points: `query_archive()` / `query_archive_async()`.
+- **pagination.py** — Cursor pagination for the `observations` field, plus the policy that keeps a long walk alive: page size, per-page timeout, retry classification, backoff, and the progress heartbeat. Internal; callers reach it through `archive.py`'s keyword arguments. It is handed an open session and a parsed request, so it can be tested against a stub with no network.
 - **cli.py** — Typer CLI wrapping `query_archive`. Options: `--fields`, `--exclude-fields`, `--filter`, `--sort`, `--search`, `--limit`, `--page-size`, `--page-timeout`, `--url-format`, `--show-fields`, `--verify-ssl`.
 - **\_\_init\_\_.py** — re-exports public API only.
 
