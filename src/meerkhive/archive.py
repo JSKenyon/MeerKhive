@@ -25,18 +25,24 @@ Design notes:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import ssl
-from collections.abc import Callable
+import time
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, Literal
 
-from aiohttp import ClientConnectorCertificateError, ClientConnectorSSLError
-from gql import gql
-from gql.client import Client
+from aiohttp import ClientConnectorCertificateError, ClientConnectorSSLError, ClientTimeout
+from gql import GraphQLRequest, gql
+from gql.client import AsyncClientSession, Client
 from gql.transport.aiohttp import AIOHTTPTransport
-from gql.transport.exceptions import TransportQueryError, TransportServerError
+from gql.transport.exceptions import (
+    TransportConnectionFailed,
+    TransportQueryError,
+    TransportServerError,
+)
 from graphql import (
     GraphQLObjectType,
     get_named_type,
@@ -57,6 +63,11 @@ logger = logging.getLogger(__name__)
 # stringified the enum members anyway).
 UrlFormat = Literal["internal", "external"]
 
+# The public API: what a caller using MeerKhive as a library would reasonably
+# reach for. Module-level constants are deliberately absent — every one of them
+# is the default of a keyword argument, which is how a caller is meant to
+# change it. Names not listed here are internal and may change without notice;
+# the package does not use a leading-underscore convention to mark them.
 __all__ = [
     "AuthenticatedTransport",
     "UrlFormat",
@@ -68,10 +79,355 @@ __all__ = [
     "parse_sort",
     "query_archive",
     "query_archive_async",
-    "DEFAULT_FIELD_OVERRIDES",
-    "JSON_FILTER_FIELDS",
-    "LIST_FILTER_FIELDS",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Pagination, timeouts and retries
+# ---------------------------------------------------------------------------
+
+# The archive silently caps the records it returns per request at 100:
+# requesting 200, 500 or 1000 all yield exactly 100 records, for the same
+# ~6 s of wall-clock as a request for 25. The dominant cost is per-request
+# rather than per-record, so fetching 100 at a time is roughly 3.7x faster
+# over a large query than the 25 used previously, and exposes the walk to the
+# latency tail four times less often.
+# See https://github.com/JSKenyon/MeerKhive/issues/17
+MAX_PAGE_SIZE = 100
+DEFAULT_PAGE_SIZE = MAX_PAGE_SIZE
+
+# gql defaults ``execute_timeout`` to 10 s, which sits barely above the
+# archive's observed median page latency (~6 s) and well inside its tail.
+# 120 s is far enough out that only a genuinely stuck request trips it.
+DEFAULT_PAGE_TIMEOUT = 120.0
+
+# Total attempts per page, including the first. Retrying at the call level
+# instead would be near-useless: if one attempt at an N-page walk fails with
+# probability p, whole-query retries still fail with probability p**k.
+DEFAULT_MAX_ATTEMPTS = 3
+INITIAL_RETRY_DELAY_SECONDS = 1.0
+
+# These two defaults set a theoretical ceiling on how long a query can run
+# before giving up: pages x max_attempts x page_timeout, so roughly an hour for
+# a 1000-record query. That bound is never approached in practice — a page
+# takes about 6 s, making the same query about 70 s — because reaching it would
+# need every attempt at every page to hang for the full timeout. There is
+# deliberately no overall deadline: a caller that needs one can wrap the query
+# in asyncio.timeout().
+
+# How often to report that a single request is still in flight. Without this
+# a slow page is indistinguishable from a hang for up to ``DEFAULT_PAGE_TIMEOUT``.
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+# Failure types worth catching. ``TransportConnectionFailed`` covers the whole
+# transient-connection class, because gql's aiohttp transport wraps every
+# non-``TransportError`` exception — a TCP reset, a dropped connection, a DNS
+# blip — in it. ``TransportQueryError`` is deliberately absent: a GraphQL-level
+# error is deterministic, so retrying only wastes time. Membership here is
+# necessary but not sufficient; :func:`is_retryable` decides per instance.
+RETRYABLE_ERRORS = (TimeoutError, TransportServerError, TransportConnectionFailed)
+
+
+def validate_page_size(page_size: int) -> None:
+    """Check a requested page size.
+
+    Deliberately side-effect free, so it is safe to call from more than one
+    layer: the CLI validates to report a usage error, and the query entry
+    points validate for direct API callers.
+
+    Args:
+        page_size: Number of records to request per page.
+
+    Raises:
+        ValueError: If ``page_size`` is less than one.
+    """
+    if page_size < 1:
+        raise ValueError(f"Invalid value for 'page_size': {page_size!r}. Must be at least 1.")
+
+
+def validate_limit(limit: int) -> None:
+    """Check a requested record limit.
+
+    Args:
+        limit: Maximum records to return across all pages.
+
+    Raises:
+        ValueError: If ``limit`` is less than one.
+    """
+    if limit < 1:
+        raise ValueError(f"Invalid value for 'limit': {limit!r}. Must be at least 1.")
+
+
+def validate_page_timeout(page_timeout: float) -> None:
+    """Check a requested per-page timeout.
+
+    Args:
+        page_timeout: Seconds allowed for a single page request.
+
+    Raises:
+        ValueError: If ``page_timeout`` is not greater than zero.
+    """
+    if page_timeout <= 0:
+        raise ValueError(
+            f"Invalid value for 'page_timeout': {page_timeout!r}. Must be greater than 0."
+        )
+
+
+def validate_max_attempts(max_attempts: int) -> None:
+    """Check a requested retry depth.
+
+    Args:
+        max_attempts: Total attempts per page, including the first.
+
+    Raises:
+        ValueError: If ``max_attempts`` is less than one.
+    """
+    if max_attempts < 1:
+        raise ValueError(f"Invalid value for 'max_attempts': {max_attempts!r}. Must be at least 1.")
+
+
+def warn_if_page_size_exceeds_cap(page_size: int) -> None:
+    """Warn when the archive will return fewer records than were asked for.
+
+    Deliberately a warning rather than a clamp: the server is the authority on
+    its own cap, and silently rewriting the request would hide a future change
+    to it. The walk is correct either way, because it advances by the number of
+    records actually returned.
+
+    Args:
+        page_size: Number of records requested per page.
+    """
+    if page_size > MAX_PAGE_SIZE:
+        logger.warning(
+            f"Requested page_size={page_size} exceeds the archive's cap of {MAX_PAGE_SIZE}; "
+            f"the server will return at most {MAX_PAGE_SIZE} records per request."
+        )
+
+
+def compute_retry_delay(attempt: int) -> float:
+    """Return the seconds to wait before retrying, after a failed attempt.
+
+    The delay doubles each time, so a burst of failures backs off rather than
+    hammering an archive that is already struggling.
+
+    Args:
+        attempt: The one-based number of the attempt that just failed.
+
+    Returns:
+        Seconds to wait before the next attempt.
+    """
+    return INITIAL_RETRY_DELAY_SECONDS * 2 ** (attempt - 1)
+
+
+def is_retryable(error: Exception) -> bool:
+    """Report whether a failed request is worth trying again.
+
+    Timeouts and connection failures are transient by nature. A server-side
+    (5xx) response may be too. A client-side (4xx) response is deterministic,
+    so retrying it only burns the timeout budget. A 401 reaches this point only
+    after :class:`AuthenticatedTransport` has already retried it once with a
+    freshly minted token, so a second one is an auth failure rather than a
+    stale token, and retrying it further would not help.
+
+    Args:
+        error: The exception raised by the failed request.
+
+    Returns:
+        ``True`` if the request should be retried.
+    """
+    if isinstance(error, TransportServerError):
+        # gql leaves ``code`` unset when the server reported no status, which
+        # is not evidence that the failure is deterministic.
+        return error.code is None or error.code >= 500
+
+    return isinstance(error, RETRYABLE_ERRORS)
+
+
+async def cancel_and_wait(task: asyncio.Task[Any]) -> None:
+    """Cancel a task and wait for it to finish.
+
+    ``gather(..., return_exceptions=True)`` absorbs the task's own
+    ``CancelledError`` while still letting a cancellation aimed at the caller
+    propagate. ``contextlib.suppress(asyncio.CancelledError)`` would swallow
+    both, silently stranding a caller that wrapped us in a deadline.
+
+    Args:
+        task: The task to cancel.
+    """
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@contextlib.asynccontextmanager
+async def heartbeat(
+    task_name: str,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncGenerator[None, None]:
+    """Log periodic progress while the wrapped operation is in flight.
+
+    Args:
+        task_name: Human-readable name of the task, e.g. ``"page 3"``.
+        interval: Seconds between reports.
+
+    Yields:
+        ``None``; the heartbeat runs for the lifetime of the ``async with``.
+    """
+
+    async def report_progress() -> None:
+        start = time.monotonic()
+        while True:
+            await asyncio.sleep(interval)
+            logger.info(f"Still waiting on {task_name} ({time.monotonic() - start:.0f}s elapsed).")
+
+    reporter_task = asyncio.create_task(report_progress())
+    try:
+        yield
+    finally:
+        # Wait for the cancellation so the reporter cannot outlive this block
+        # and log against work that has already finished.
+        await cancel_and_wait(reporter_task)
+
+
+async def fetch_page(
+    session: AsyncClientSession,
+    request: GraphQLRequest,
+    *,
+    page_number: int,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+) -> dict[str, Any]:
+    """Execute a single page, retrying transient failures with backoff.
+
+    Args:
+        session: An open gql session against the archive.
+        request: The GraphQL request to execute, carrying this page's
+            variable values.
+        page_number: One-based page number, used only for logging.
+        max_attempts: Total attempts, including the first.
+
+    Returns:
+        The decoded GraphQL response for this page.
+
+    Raises:
+        TransportConnectionFailed: If every attempt fails to reach the
+            archive. A page that exceeds its deadline usually arrives this
+            way: the aiohttp session's own timeout fires marginally before
+            gql's, and gql wraps it because it is not a ``TransportError``.
+        TimeoutError: If gql's deadline wins the race instead.
+        TransportServerError: On a client-side (4xx) error, or if every
+            attempt fails with a server-side error.
+        TransportQueryError: If the archive returns GraphQL-level errors.
+        ValueError: If ``max_attempts`` is less than one.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with heartbeat(f"page {page_number}"):
+                return await session.execute(request)
+        except RETRYABLE_ERRORS as e:
+            if not is_retryable(e):
+                raise
+            if attempt == max_attempts:
+                logger.error(f"Page {page_number} failed after {max_attempts} attempts.")
+                raise
+
+            delay = compute_retry_delay(attempt)
+            logger.warning(
+                f"Page {page_number} failed ({type(e).__name__}); retrying in {delay:.0f}s "
+                f"(attempt {attempt + 1}/{max_attempts})."
+            )
+            await asyncio.sleep(delay)
+
+    # Reachable only when the loop body never ran, i.e. max_attempts < 1.
+    raise ValueError(f"Invalid value for 'max_attempts': {max_attempts!r}. Must be at least 1.")
+
+
+async def fetch_all_pages(
+    session: AsyncClientSession,
+    request: GraphQLRequest,
+    variables: dict[str, Any],
+    *,
+    page_size: int,
+    limit: int,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+) -> list[dict[str, Any]]:
+    """Walk the ``observations`` cursor until the limit or the results run out.
+
+    Args:
+        session: An open gql session against the archive.
+        request: The parsed GraphQL request to execute.
+        variables: Variable values for the request. ``limit`` and ``cursor``
+            are added per page.
+        page_size: Records to request per page.
+        limit: Maximum records to return across all pages.
+        max_attempts: Total attempts per page, including the first.
+
+    Returns:
+        The accumulated records, at most ``limit`` of them.
+    """
+    records: list[dict[str, Any]] = []
+    cursor: str | None = None
+    page_number = 0
+
+    while True:
+        page_number += 1
+        page_variables = {
+            **variables,
+            "cursor": cursor,
+            # Trim the final request so a large page size cannot overshoot a
+            # small limit.
+            "limit": min(page_size, limit - len(records)),
+        }
+        # A fresh request per page: gql 4 deprecates passing variable_values
+        # to execute, and its compatibility shim assigns them onto the shared
+        # request object, so pages would otherwise contend for one payload.
+        result = await fetch_page(
+            session,
+            GraphQLRequest(request, variable_values=page_variables),
+            page_number=page_number,
+            max_attempts=max_attempts,
+        )
+
+        page_records = result["observations"]["records"]
+        page_info = result["observations"]["pageInfo"]
+        records.extend(page_records)
+
+        # ``totalCount`` is nullable in the schema, so the denominator is
+        # omitted rather than assumed — a log line must never break a query.
+        total_count = page_info["totalCount"]
+        if total_count is None:
+            logger.info(f"Fetched {len(records)} records (page {page_number}).")
+        else:
+            logger.info(
+                f"Fetched {len(records)}/{min(total_count, limit)} records (page {page_number})."
+            )
+
+        # Guard against a broken server that reports hasNextPage=True but
+        # returns no records — without this the cursor never advances and the
+        # loop never terminates.
+        if not page_records or not page_info["hasNextPage"] or len(records) >= limit:
+            break
+
+        cursor = page_info["endCursor"]
+
+        # A null endCursor would send the next request back to the start of
+        # the result set, accumulating duplicates until the limit is reached.
+        if cursor is None:
+            logger.warning(
+                f"Archive reported another page after page {page_number} but returned no "
+                "cursor; stopping the walk."
+            )
+            break
+
+    # The walk asks for no more than it needs, but the archive is known to
+    # ignore the requested limit above its own cap, so honour the documented
+    # guarantee here rather than trusting the server to. The warning matters:
+    # a silent trim would hide a change in the archive's behaviour.
+    if len(records) > limit:
+        logger.warning(
+            f"Archive returned {len(records)} records for a limit of {limit}; truncating."
+        )
+        return records[:limit]
+
+    return records
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +758,7 @@ class AuthenticatedTransport(AIOHTTPTransport):
         url: str,
         auth: KeycloakAuth,
         ssl_context: ssl.SSLContext,
+        request_timeout: float | None = None,
     ):
         """Initialise the transport.
 
@@ -409,8 +766,19 @@ class AuthenticatedTransport(AIOHTTPTransport):
             url: The GraphQL endpoint URL.
             auth: Keycloak configuration used to obtain bearer tokens.
             ssl_context: The SSL context to use for TLS connections.
+            request_timeout: Total seconds allowed for one HTTP request. Left
+                unset, aiohttp caps a request at its own 300 s default, which
+                would silently override any larger deadline set on the client.
         """
-        super().__init__(url=url, ssl=ssl_context)
+        # Passed via client_session_args rather than the base class's own
+        # ``timeout``, which is typed as an int and would truncate fractions.
+        # connect() applies client_session_args last, so this wins.
+        session_args = (
+            {"timeout": ClientTimeout(total=request_timeout)}
+            if request_timeout is not None
+            else None
+        )
+        super().__init__(url=url, ssl=ssl_context, client_session_args=session_args)
         self._auth = auth
 
     async def execute(
@@ -491,6 +859,16 @@ async def fetch_fields_async(
             schema.
     """
     auth = KeycloakAuth.default(verify_ssl=verify_ssl)
+
+    # Acquire the token before the gql client opens. get_access_token may drive
+    # an interactive browser login that waits minutes for a human, while gql
+    # applies execute_timeout to every request the session makes — acquiring it
+    # here keeps that login out of any request deadline, where it would be
+    # cancelled and then retried into a second browser tab. It is offloaded to
+    # a thread for the same reason AuthenticatedTransport.execute offloads it:
+    # blocking calls here would stall an embedding application's event loop.
+    await asyncio.to_thread(get_access_token, auth)
+
     transport = AuthenticatedTransport(
         url=f"{auth_address.rstrip('/')}/graphql",
         auth=auth,
@@ -528,6 +906,9 @@ async def query_archive_async(
     filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    page_timeout: float = DEFAULT_PAGE_TIMEOUT,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> list[dict[str, Any]]:
     """Query the MeerKAT archive and return matching observation records.
 
@@ -556,6 +937,17 @@ async def query_archive_async(
             self-signed endpoint.
         sort: List of sort specifiers in ``"field:asc"`` / ``"field:desc"``
             format. Parsed internally via :func:`parse_sort`.
+        page_size: Records to request per page. The archive caps this at
+            :data:`MAX_PAGE_SIZE`; larger values are warned about, not
+            rejected.
+        page_timeout: Timeout in seconds for a single page request. Applied
+            twice: as the gql client's ``execute_timeout`` (replacing its 10 s
+            default, too tight for the archive's observed latency) and as the
+            aiohttp session's total timeout, which otherwise caps a request at
+            its own 300 s default. Bounds each request, not the whole query.
+        max_attempts: Total attempts per page, including the first. Transient
+            timeouts and server-side errors are retried with exponential
+            backoff.
 
     Returns:
         The list of observation records returned by the archive, up to
@@ -563,7 +955,9 @@ async def query_archive_async(
 
     Raises:
         ValueError: If ``url_format`` is not ``"internal"`` or
-            ``"external"``, or if any filter or sort string is malformed.
+            ``"external"``, if ``limit``, ``page_size`` or ``max_attempts``
+            is less than one, if ``page_timeout`` is not greater than zero,
+            or if any filter or sort string is malformed.
         SSLError: If TLS verification fails against the archive endpoint.
         ClientConnectorSSLError: If the aiohttp connector fails TLS
             verification.
@@ -572,6 +966,11 @@ async def query_archive_async(
         ssl.SSLCertVerificationError: If the underlying SSL layer fails
             certificate verification.
         TransportQueryError: If the archive returns GraphQL-level errors.
+        TransportConnectionFailed: If a page still fails to reach the archive
+            on its final attempt. Exceeding ``page_timeout`` usually surfaces
+            this way rather than as ``TimeoutError``; see :func:`fetch_page`.
+        TimeoutError: If a page exceeds ``page_timeout`` on its final attempt
+            and gql's deadline wins the race against the session's.
         RuntimeError: If the ``Observation`` type is not found in the live
             schema. This may indicate a schema change; verify the current
             schema with ``meerkhive --show-fields``.
@@ -580,6 +979,12 @@ async def query_archive_async(
         raise ValueError(
             f"Invalid value for 'url_format': {url_format!r}. Must be 'internal' or 'external'."
         )
+
+    validate_limit(limit)
+    validate_page_size(page_size)
+    validate_page_timeout(page_timeout)
+    validate_max_attempts(max_attempts)
+    warn_if_page_size_exceeds_cap(page_size)
 
     parsed_filters = parse_filters(filters or [])
     parsed_sort = parse_sort(sort or [])
@@ -593,18 +998,31 @@ async def query_archive_async(
     )
 
     auth = KeycloakAuth.default(verify_ssl=verify_ssl)
+
+    # Acquire the token before the gql client opens. get_access_token may drive
+    # an interactive browser login that waits minutes for a human, while gql
+    # applies execute_timeout to every request the session makes — acquiring it
+    # here keeps that login out of any request deadline, where it would be
+    # cancelled and then retried into a second browser tab. It is offloaded to
+    # a thread for the same reason AuthenticatedTransport.execute offloads it:
+    # blocking calls here would stall an embedding application's event loop.
+    await asyncio.to_thread(get_access_token, auth)
+
     ssl_context = build_ssl_context(verify=verify_ssl)
 
     transport = AuthenticatedTransport(
         url=f"{auth_address.rstrip('/')}/graphql",
         auth=auth,
         ssl_context=ssl_context,
+        request_timeout=page_timeout,
     )
 
-    all_records: list[dict[str, Any]] = []
-
     try:
-        async with Client(transport=transport, fetch_schema_from_transport=True) as session:
+        async with Client(
+            transport=transport,
+            fetch_schema_from_transport=True,
+            execute_timeout=page_timeout,
+        ) as session:
             schema = session.client.schema
             observation_type = schema.get_type(OBSERVATION_TYPE)
             if not isinstance(observation_type, GraphQLObjectType):
@@ -650,38 +1068,20 @@ async def query_archive_async(
                     }}
                 }}
             """
-            query = gql(query_str)
+            request = gql(query_str)
 
-            page_size = 25
-            cursor: str | None = None
-            fetched = 0
-
-            while True:
-                variables = {
-                    "limit": min(page_size, limit - fetched),
-                    "cursor": cursor,
-                    "search": search,
-                    "filters": parsed_filters,
-                    "sort": parsed_sort,
-                }
-                try:
-                    result = await session.execute(query, variable_values=variables)
-                except TransportQueryError as e:
-                    logger.error(f"GraphQL errors: {e.errors or []}")
-                    raise
-
-                records = result["observations"]["records"]
-                page_info = result["observations"]["pageInfo"]
-                all_records.extend(records)
-                fetched += len(records)
-
-                # Guard against a broken server that reports hasNextPage=True
-                # but returns no records — without this the cursor never
-                # advances and the loop never terminates.
-                if not records or not page_info["hasNextPage"] or fetched >= limit:
-                    break
-
-                cursor = page_info["endCursor"]
+            try:
+                return await fetch_all_pages(
+                    session,
+                    request,
+                    {"search": search, "filters": parsed_filters, "sort": parsed_sort},
+                    page_size=page_size,
+                    limit=limit,
+                    max_attempts=max_attempts,
+                )
+            except TransportQueryError as e:
+                logger.error(f"GraphQL errors: {e.errors or []}")
+                raise
 
     except (
         SSLError,
@@ -700,8 +1100,6 @@ async def query_archive_async(
         # Re-raise so callers can distinguish "no results" from "broken TLS".
         raise
 
-    return all_records
-
 
 def query_archive(
     auth_address: str = "https://archive.sarao.ac.za",
@@ -713,6 +1111,9 @@ def query_archive(
     filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    page_timeout: float = DEFAULT_PAGE_TIMEOUT,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
 ) -> list[dict[str, Any]]:
     """Synchronous wrapper around :func:`query_archive_async`.
 
@@ -730,5 +1131,8 @@ def query_archive(
             filters=filters,
             verify_ssl=verify_ssl,
             sort=sort,
+            page_size=page_size,
+            page_timeout=page_timeout,
+            max_attempts=max_attempts,
         )
     )
