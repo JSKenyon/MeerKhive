@@ -8,8 +8,9 @@ delegated entirely to :mod:`meerkhive.auth`.
 Design notes:
 
 - The selection block is generated dynamically so the client tracks schema
-  changes without code edits. Field overrides handle the one schema-specific
-  oddity (``rdb`` takes an ``internal`` argument).
+  changes without code edits. Field overrides are the escape hatch for fields
+  the generic walker cannot render, and are the only way to select a field
+  that requires an argument.
 - :class:`AuthenticatedTransport` injects the bearer token on every request
   and transparently retries once on HTTP 401, after asking the auth module for
   a fresh token. This means a long pagination run that outlives the 5-minute
@@ -29,8 +30,7 @@ import json
 import logging
 import os
 import ssl
-from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any
 
 from aiohttp import ClientConnectorCertificateError, ClientConnectorSSLError, ClientTimeout
 from gql import gql
@@ -62,12 +62,6 @@ from meerkhive.pagination import (
 
 logger = logging.getLogger(__name__)
 
-# The ``url_format`` argument of the public API is restricted to these two
-# string literals. ``Literal`` gives us static-checker support without the
-# runtime ceremony of a real ``Enum`` (the previous implementation always
-# stringified the enum members anyway).
-UrlFormat = Literal["internal", "external"]
-
 # The public API: what a caller using MeerKhive as a library would reasonably
 # reach for. Module-level constants are deliberately absent — every one of them
 # is the default of a keyword argument, which is how a caller is meant to
@@ -75,7 +69,6 @@ UrlFormat = Literal["internal", "external"]
 # the package does not use a leading-underscore convention to mark them.
 __all__ = [
     "AuthenticatedTransport",
-    "UrlFormat",
     "build_selection_block",
     "build_ssl_context",
     "fetch_fields",
@@ -231,14 +224,15 @@ def parse_sort(sort_args: list[str]) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
-# Field-name -> ``(url_format) -> selection-fragment`` mapping. The default
-# carries the only schema-specific knowledge: the ``rdb`` field needs an
-# ``internal`` boolean argument that toggles whether the URL is reachable
-# from inside SARAO or via the public internet. Lifting this out of the
-# generic walker keeps :func:`build_selection_block` schema-agnostic.
-DEFAULT_FIELD_OVERRIDES: dict[str, Callable[[UrlFormat], str]] = {
-    "rdb": lambda url_format: f"rdb(internal: {'false' if url_format == 'external' else 'true'})",
-}
+# Field-name -> selection-fragment mapping, used to render a field as
+# something other than its bare name. Empty by design: the client now holds no
+# schema-specific knowledge. The only entry it ever had rendered
+# ``rdb(internal: false)``, and the archive has stopped honouring that argument
+# — it returns the same URL for true, false and no argument at all — so the
+# client no longer sends an argument the observatory is deprecating. The
+# mechanism stays because an override is the only way to select a field that
+# takes a required argument.
+DEFAULT_FIELD_OVERRIDES: dict[str, str] = {}
 
 
 def _check_field_names(names: set[str], gql_type: GraphQLObjectType, param: str) -> None:
@@ -265,8 +259,7 @@ def build_selection_block(
     *,
     skip_fields: set[str] | None = None,
     fields: set[str] | None = None,
-    url_format: UrlFormat = "external",
-    field_overrides: dict[str, Callable[[UrlFormat], str]] | None = None,
+    field_overrides: dict[str, str] | None = None,
 ) -> str:
     """Build a GraphQL selection block by walking a type's fields.
 
@@ -278,7 +271,6 @@ def build_selection_block(
         fields: Specific top-level fields to include. ``None`` (the default)
             includes every field the schema exposes. Nested levels always
             include all fields regardless of this setting.
-        url_format: Forwarded to field overrides.
         field_overrides: Per-field rendering overrides; falls back to
             :data:`DEFAULT_FIELD_OVERRIDES` when ``None``.
 
@@ -298,7 +290,6 @@ def build_selection_block(
         depth=0,
         skip_fields=skip_fields or set(),
         fields=fields,
-        url_format=url_format,
         overrides=overrides,
         ancestors=frozenset(),
     )
@@ -310,8 +301,7 @@ def _walk_selection(
     depth: int,
     skip_fields: set[str],
     fields: set[str] | None,
-    url_format: UrlFormat,
-    overrides: dict[str, Callable[[UrlFormat], str]],
+    overrides: dict[str, str],
     ancestors: frozenset[str],
 ) -> str:
     """Recursive helper for :func:`build_selection_block`.
@@ -321,7 +311,6 @@ def _walk_selection(
         depth: Current recursion depth, used solely for indentation.
         skip_fields: Field names to omit.
         fields: If not ``None``, only include fields in this set.
-        url_format: Forwarded to field overrides.
         overrides: Per-field rendering overrides.
         ancestors: Names of object types strictly above ``gql_type`` on
             the current recursion path. A field whose unwrapped type is
@@ -363,8 +352,7 @@ def _walk_selection(
             )
             continue
 
-        override = overrides.get(field_name)
-        rendered_name = override(url_format) if override else field_name
+        rendered_name = overrides.get(field_name, field_name)
 
         # Scalars and enums are both GraphQL leaf types — emit them as bare
         # field names without a sub-selection.
@@ -385,7 +373,6 @@ def _walk_selection(
                 depth=depth + 1,
                 skip_fields=set(),  # skip_fields is a top-level-only concept
                 fields=None,  # always include all nested subfields
-                url_format=url_format,
                 overrides=overrides,
                 ancestors=visited,
             )
@@ -570,7 +557,6 @@ async def query_archive_async(
     exclude_fields: str | None = None,
     search: str = "*",
     limit: int = 1000,
-    url_format: UrlFormat = "external",
     filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
@@ -593,9 +579,6 @@ async def query_archive_async(
         search: Free-text search term passed to the GraphQL ``search``
             variable.
         limit: Maximum number of records to return across all pages.
-        url_format: Either ``"internal"`` or ``"external"``. Controls
-            whether URL-valued fields (e.g. ``rdb``) are rendered for
-            in-SARAO or public-internet use.
         filters: List of ``"key=value"`` filter strings. Parsed internally
             via :func:`parse_filters`. Pass ``None`` (or omit) for no
             filtering. Examples: ``["Band=L"]``,
@@ -622,10 +605,9 @@ async def query_archive_async(
         ``limit`` entries.
 
     Raises:
-        ValueError: If ``url_format`` is not ``"internal"`` or
-            ``"external"``, if ``limit``, ``page_size`` or ``max_attempts``
-            is less than one, if ``page_timeout`` is not greater than zero,
-            or if any filter or sort string is malformed.
+        ValueError: If ``limit``, ``page_size`` or ``max_attempts`` is less
+            than one, if ``page_timeout`` is not greater than zero, or if any
+            filter or sort string is malformed.
         SSLError: If TLS verification fails against the archive endpoint.
         ClientConnectorSSLError: If the aiohttp connector fails TLS
             verification.
@@ -643,11 +625,6 @@ async def query_archive_async(
             schema. This may indicate a schema change; verify the current
             schema with ``meerkhive --show-fields``.
     """
-    if url_format not in ("internal", "external"):
-        raise ValueError(
-            f"Invalid value for 'url_format': {url_format!r}. Must be 'internal' or 'external'."
-        )
-
     validate_limit(limit)
     validate_page_size(page_size)
     validate_page_timeout(page_timeout)
@@ -707,7 +684,6 @@ async def query_archive_async(
                 observation_type,
                 skip_fields=skip_fields,
                 fields=requested_fields,
-                url_format=url_format,
             )
 
             # NOTE: double braces escape ``{`` / ``}`` in the f-string so the
@@ -779,7 +755,6 @@ def query_archive(
     exclude_fields: str | None = None,
     search: str = "*",
     limit: int = 1000,
-    url_format: UrlFormat = "external",
     filters: list[str] | None = None,
     verify_ssl: bool = True,
     sort: list[str] | None = None,
@@ -799,7 +774,6 @@ def query_archive(
             exclude_fields=exclude_fields,
             search=search,
             limit=limit,
-            url_format=url_format,
             filters=filters,
             verify_ssl=verify_ssl,
             sort=sort,

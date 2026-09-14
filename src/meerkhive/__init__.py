@@ -19,7 +19,6 @@ Example::
 
 from meerkhive.archive import (
     AuthenticatedTransport,
-    UrlFormat,
     build_selection_block,
     build_ssl_context,
     fetch_fields,
@@ -34,7 +33,6 @@ from meerkhive.auth import KeycloakAuth, get_access_token
 __all__ = [
     "AuthenticatedTransport",
     "KeycloakAuth",
-    "UrlFormat",
     "build_selection_block",
     "build_ssl_context",
     "fetch_fields",

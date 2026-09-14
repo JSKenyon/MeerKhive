@@ -8,7 +8,7 @@ All logs go to stderr.
 import json
 import logging
 import sys
-from typing import Annotated, Literal
+from typing import Annotated
 
 import typer
 
@@ -74,10 +74,6 @@ def main(
         bool,
         typer.Option("--show-fields", help="Print available field names and exit."),
     ] = False,
-    url_format: Annotated[
-        Literal["internal", "external"],
-        typer.Option(help="URL format for link-valued fields: 'internal' or 'external'."),
-    ] = "external",
     filter: Annotated[  # Shadows the builtin deliberately: it mirrors the CLI flag name.
         list[str] | None,
         typer.Option(
@@ -137,7 +133,6 @@ def main(
         exclude_fields=exclude_fields,
         search=search,
         limit=limit,
-        url_format=url_format,
         filters=filter,
         verify_ssl=verify_ssl,
         sort=sort,
