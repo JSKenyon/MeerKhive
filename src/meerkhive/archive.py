@@ -998,16 +998,6 @@ async def query_archive_async(
     )
 
     auth = KeycloakAuth.default(verify_ssl=verify_ssl)
-
-    # Acquire the token before the gql client opens. get_access_token may drive
-    # an interactive browser login that waits minutes for a human, while gql
-    # applies execute_timeout to every request the session makes — acquiring it
-    # here keeps that login out of any request deadline, where it would be
-    # cancelled and then retried into a second browser tab. It is offloaded to
-    # a thread for the same reason AuthenticatedTransport.execute offloads it:
-    # blocking calls here would stall an embedding application's event loop.
-    await asyncio.to_thread(get_access_token, auth)
-
     ssl_context = build_ssl_context(verify=verify_ssl)
 
     transport = AuthenticatedTransport(
@@ -1018,6 +1008,18 @@ async def query_archive_async(
     )
 
     try:
+        # Acquire the token before the gql client opens. get_access_token may
+        # drive an interactive browser login that waits minutes for a human,
+        # while gql applies execute_timeout to every request the session makes
+        # — acquiring it here keeps that login out of any request deadline,
+        # where it would be cancelled and then retried into a second browser
+        # tab. It is offloaded to a thread for the same reason
+        # AuthenticatedTransport.execute offloads it: blocking calls here would
+        # stall an embedding application's event loop. It stays inside this try
+        # because Keycloak is reached with requests, making it the likeliest
+        # source of the SSLError the handler below explains.
+        await asyncio.to_thread(get_access_token, auth)
+
         async with Client(
             transport=transport,
             fetch_schema_from_transport=True,

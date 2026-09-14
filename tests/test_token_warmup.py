@@ -7,9 +7,11 @@ login is cancelled at the deadline and then retried, opening a fresh browser
 tab each time. See https://github.com/JSKenyon/MeerKhive/issues/17
 """
 
+import logging
 from typing import Any
 
 import pytest
+from requests.exceptions import SSLError
 
 from meerkhive import archive
 from meerkhive.archive import fetch_fields, query_archive
@@ -59,3 +61,24 @@ def test_fetch_fields_acquires_the_token_before_opening_the_client(
         fetch_fields()
 
     assert call_order == ["token", "client"]
+
+
+def test_query_archive_explains_a_tls_failure_during_token_acquisition(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Warming the token early must not move it out of the handler that explains
+    # TLS failures. Keycloak is reached with requests, so it is where an
+    # SSLError actually originates, and the CA-bundle advice exists for it.
+    def raise_ssl_error(auth: object, *, force_refresh: bool = False) -> str:
+        raise SSLError("certificate verify failed")
+
+    monkeypatch.setattr(archive, "get_access_token", raise_ssl_error)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="meerkhive.archive"),
+        pytest.raises(SSLError),
+    ):
+        query_archive(limit=1)
+
+    assert any("REQUESTS_CA_BUNDLE" in r.message for r in caplog.records)
