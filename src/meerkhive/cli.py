@@ -12,7 +12,16 @@ from typing import Annotated, Literal
 
 import typer
 
-from meerkhive.archive import fetch_fields, query_archive
+from meerkhive.archive import (
+    DEFAULT_PAGE_SIZE,
+    DEFAULT_PAGE_TIMEOUT,
+    MAX_PAGE_SIZE,
+    fetch_fields,
+    query_archive,
+    validate_limit,
+    validate_page_size,
+    validate_page_timeout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +54,23 @@ def main(
         int,
         typer.Option(help="Maximum number of records to fetch."),
     ] = 1000,
+    page_size: Annotated[
+        int,
+        typer.Option(
+            "--page-size",
+            help=(
+                f"Records to request per page (max {MAX_PAGE_SIZE}; larger values are "
+                "capped by the archive)."
+            ),
+        ),
+    ] = DEFAULT_PAGE_SIZE,
+    page_timeout: Annotated[
+        float,
+        typer.Option(
+            "--page-timeout",
+            help="Timeout in seconds for a single page request (not for the query as a whole).",
+        ),
+    ] = DEFAULT_PAGE_TIMEOUT,
     show_fields: Annotated[
         bool,
         typer.Option("--show-fields", help="Print available field names and exit."),
@@ -90,6 +116,17 @@ def main(
         print(fetch_fields(auth_address=auth_address, verify_ssl=verify_ssl))
         return
 
+    # Report bad option values as usage errors rather than tracebacks. This
+    # deliberately wraps only the validators: a ValueError from the query
+    # itself (requests raises JSONDecodeError, a ValueError, when the auth
+    # server returns an HTML error page) is an outage, not a usage error.
+    try:
+        validate_limit(limit)
+        validate_page_size(page_size)
+        validate_page_timeout(page_timeout)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+
     records = query_archive(
         auth_address=auth_address,
         fields=fields,
@@ -100,6 +137,8 @@ def main(
         filters=filter,
         verify_ssl=verify_ssl,
         sort=sort,
+        page_size=page_size,
+        page_timeout=page_timeout,
     )
 
     for record in records:

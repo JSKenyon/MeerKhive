@@ -132,6 +132,31 @@ On the SARAO internal network, pass `--url-format internal` to get intranet URLs
 meerkhive --url-format internal --limit 5
 ```
 
+### Pagination and timeouts
+
+Results are fetched a page at a time. The archive caps a page at 100 records, which is
+also the default, and the cost of a request is dominated by a fixed per-request
+overhead rather than by the number of records — so smaller pages are slower overall,
+not faster.
+
+```bash
+# Smaller pages: slower for large queries, but lighter on the archive.
+meerkhive --page-size 25 --limit 500
+```
+
+`--page-timeout` sets the deadline for a single page request in seconds (default 120);
+it bounds each request, not the query as a whole. It applies to both the GraphQL client
+and the underlying HTTP session, so values above aiohttp's own 300 s default take effect
+rather than being silently capped. Archive latency is highly variable, so
+a page that would previously have failed is now attempted up to three times in total —
+the initial request plus two retries — with exponential backoff. Connection failures and
+5xx responses are retried on the same terms. Progress is reported on stderr, leaving
+stdout clean for `jq`:
+
+```bash
+meerkhive --page-timeout 60 --limit 2000 > observations.ndjson
+```
+
 ### SSL (development only)
 
 ```bash
